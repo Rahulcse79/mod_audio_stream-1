@@ -164,6 +164,18 @@ private:
             self->eventCallback(MESSAGE, message.c_str());
         });
 
+        /*
+         * Binary audio injection path (no JSON/base64):
+         * payload = raw PCM16LE, mono by default.
+         * This is intended for realtime audio to avoid JSON overhead/jitter.
+         */
+        client.setBinaryCallback([wp](const void* data, size_t len) {
+            auto self = wp.lock();
+            if (!self) return;
+            if (self->isCleanedUp()) return;
+            self->eventCallbackBinary(data, len);
+        });
+
         client.setOpenCallback([wp]() {
             auto self = wp.lock();
             if (!self) return;
@@ -218,6 +230,85 @@ private:
             cJSON_Delete(root);
             switch_safe_free(json_str);
         });
+    }
+
+    void eventCallbackBinary(const void* data, size_t len) {
+        if (!data || len == 0) return;
+
+        switch_core_session_t* psession = switch_core_session_locate(m_sessionId.c_str());
+        if (!psession) {
+            return;
+        }
+
+        switch_media_bug_t* bug = get_media_bug(psession);
+        if (!bug) {
+            switch_core_session_rwunlock(psession);
+            return;
+        }
+        auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
+        if (!tech_pvt || !tech_pvt->inject_buffer) {
+            switch_core_session_rwunlock(psession);
+            return;
+        }
+
+        // Ensure even bytes for PCM16.
+        size_t n = len & ~size_t(1);
+        if (n == 0) {
+            switch_core_session_rwunlock(psession);
+            return;
+        }
+
+        // Treat incoming as mono PCM16LE at tech_pvt output rate.
+        const int out_channels = (tech_pvt->channels == 2) ? 2 : 1;
+        const int out_sr = tech_pvt->sampling > 0 ? tech_pvt->sampling : tech_pvt->inject_sample_rate;
+        if (out_sr <= 0) {
+            switch_core_session_rwunlock(psession);
+            return;
+        }
+
+        // If caller sends mono but call is stereo, upmix.
+        std::string decoded((const char*)data, (const char*)data + n);
+        if (out_channels == 2) {
+            decoded = upmix_mono_to_stereo_pcm16le((const uint8_t*)decoded.data(), decoded.size());
+        }
+
+        // Frame-align to 20ms of out_sr/out_channels.
+        const size_t frame_bytes_20ms = pcm16_bytes_per_ms(out_sr, out_channels) * 20u;
+        if (frame_bytes_20ms > 0 && decoded.size() >= frame_bytes_20ms) {
+            decoded.resize(decoded.size() - (decoded.size() % frame_bytes_20ms));
+        }
+        if (decoded.empty()) {
+            switch_core_session_rwunlock(psession);
+            return;
+        }
+
+        if (switch_mutex_trylock(tech_pvt->inject_mutex ? tech_pvt->inject_mutex : tech_pvt->mutex) != SWITCH_STATUS_SUCCESS) {
+            // Don't block WS thread; drop.
+            switch_core_session_rwunlock(psession);
+            return;
+        }
+
+        // Drop-oldest on overflow (same strategy as JSON path).
+        const switch_size_t inuse_before = switch_buffer_inuse(tech_pvt->inject_buffer);
+        const switch_size_t free_before = switch_buffer_freespace(tech_pvt->inject_buffer);
+        const size_t max_bytes = (size_t)inuse_before + (size_t)free_before;
+        if (max_bytes > 0 && (size_t)inuse_before + decoded.size() > max_bytes) {
+            size_t over = ((size_t)inuse_before + decoded.size()) - max_bytes;
+            size_t drop = over;
+            if (frame_bytes_20ms > 0) {
+                drop = ((over + frame_bytes_20ms - 1) / frame_bytes_20ms) * frame_bytes_20ms;
+            }
+            if (drop > (size_t)inuse_before) drop = (size_t)inuse_before;
+            if (drop > 0) {
+                drop_oldest_from_buffer(tech_pvt->inject_buffer, (switch_size_t)drop);
+            }
+        }
+
+        switch_buffer_write(tech_pvt->inject_buffer, decoded.data(), (switch_size_t)decoded.size());
+        atomic_fetch_add(&tech_pvt->inject_bytes_written, (unsigned long long)decoded.size());
+        switch_mutex_unlock(tech_pvt->inject_mutex ? tech_pvt->inject_mutex : tech_pvt->mutex);
+
+        switch_core_session_rwunlock(psession);
     }
 
     switch_media_bug_t *get_media_bug(switch_core_session_t *session) {
@@ -592,13 +683,14 @@ private:
         }
 
         if (sampleRate != out_sr) {
-            switch_mutex_lock(tech_pvt->mutex);
+            /* Use injection mutex so we don't contend with other session/control operations. */
+            switch_mutex_lock(tech_pvt->inject_mutex);
             if (!tech_pvt->inject_resampler) {
                 int err = 0;
                 tech_pvt->inject_resampler = speex_resampler_init(out_channels, sampleRate, out_sr,
                                                                   SWITCH_RESAMPLE_QUALITY, &err);
                 if (err != 0 || !tech_pvt->inject_resampler) {
-                    switch_mutex_unlock(tech_pvt->mutex);
+                    switch_mutex_unlock(tech_pvt->inject_mutex);
                     push_err(out, m_sessionId, "processMessage - failed to init inject resampler");
                     return out;
                 }
@@ -615,7 +707,7 @@ private:
                     tech_pvt->inject_resampler = speex_resampler_init(out_channels, sampleRate, out_sr,
                                                                       SWITCH_RESAMPLE_QUALITY, &err);
                     if (err != 0 || !tech_pvt->inject_resampler) {
-                        switch_mutex_unlock(tech_pvt->mutex);
+                        switch_mutex_unlock(tech_pvt->inject_mutex);
                         push_err(out, m_sessionId, "processMessage - failed to reinit inject resampler");
                         return out;
                     }
@@ -626,7 +718,7 @@ private:
             }
 
             SpeexResamplerState* inj_rs = tech_pvt->inject_resampler;
-            switch_mutex_unlock(tech_pvt->mutex);
+            switch_mutex_unlock(tech_pvt->inject_mutex);
 
             decoded = resample_pcm16le_speex((const uint8_t*)decoded.data(), decoded.size(), out_channels,
                                             sampleRate, out_sr, inj_rs);
@@ -649,7 +741,13 @@ private:
             decoded.resize(decoded.size() - (decoded.size() % frame_bytes_20ms));
         }
 
-        switch_mutex_lock(tech_pvt->mutex);
+        /* Don't ever block the WS callback thread for long either; if injector is busy, drop gracefully.
+         * This also avoids forcing the media thread to contend.
+         */
+        if (switch_mutex_trylock(tech_pvt->inject_mutex) != SWITCH_STATUS_SUCCESS) {
+            push_err(out, m_sessionId, "processMessage - injector busy (inject_mutex)");
+            return out;
+        }
 
         tech_pvt->inject_sample_rate = out_sr;
         tech_pvt->inject_bytes_per_sample = 2;
@@ -693,7 +791,8 @@ private:
 
         switch_buffer_write(tech_pvt->inject_buffer, decoded.data(), (switch_size_t)decoded.size());
         const switch_size_t inuse_after = switch_buffer_inuse(tech_pvt->inject_buffer);
-        switch_mutex_unlock(tech_pvt->mutex);
+    atomic_fetch_add(&tech_pvt->inject_bytes_written, (unsigned long long)decoded.size());
+    switch_mutex_unlock(tech_pvt->inject_mutex);
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
               "(%s) PUSHBACK queued: decoded_bytes=%zu in_sr=%d out_sr=%d in_ch=%d out_ch=%d inject_inuse_after=%u\n",
@@ -776,6 +875,7 @@ namespace {
 
         
         switch_mutex_init(&tech_pvt->mutex, SWITCH_MUTEX_NESTED, pool);
+    switch_mutex_init(&tech_pvt->inject_mutex, SWITCH_MUTEX_NESTED, pool);
         
         if (switch_buffer_create(pool, &tech_pvt->sbuffer, buflen) != SWITCH_STATUS_SUCCESS) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
@@ -831,6 +931,10 @@ namespace {
         if (tech_pvt->mutex) {
             switch_mutex_destroy(tech_pvt->mutex);
             tech_pvt->mutex = nullptr;
+        }
+        if (tech_pvt->inject_mutex) {
+            switch_mutex_destroy(tech_pvt->inject_mutex);
+            tech_pvt->inject_mutex = nullptr;
         }
         tech_pvt->inject_buffer = nullptr;
         tech_pvt->sbuffer = nullptr;

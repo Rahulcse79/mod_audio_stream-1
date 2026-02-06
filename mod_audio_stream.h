@@ -3,6 +3,7 @@
 
 #include <switch.h>
 #include <speex/speex_resampler.h>
+#include <stdatomic.h>
 
 #define MY_BUG_NAME        "audio_stream"
 #define MAX_SESSION_ID     (256)
@@ -24,6 +25,10 @@ typedef void (*responseHandler_t)(
 struct private_data {
 
     switch_mutex_t *mutex;
+    /* Dedicated mutex for injection (WS -> FS) buffer/resampler.
+     * Keep media callback as non-blocking; use trylock on the other side too.
+     */
+    switch_mutex_t *inject_mutex;
 
     char sessionId[MAX_SESSION_ID];
     char ws_uri[MAX_WS_URI];
@@ -50,6 +55,12 @@ struct private_data {
     switch_buffer_t *inject_buffer;
     int inject_sample_rate;     
     int inject_bytes_per_sample;
+
+    /* Diagnostics counters (best-effort, not required for correctness). */
+    atomic_ullong inject_bytes_written;
+    atomic_ullong inject_bytes_read;
+    atomic_ullong inject_frames_starved;
+    atomic_ullong inject_lock_misses;
 };
 
 typedef struct private_data private_t;

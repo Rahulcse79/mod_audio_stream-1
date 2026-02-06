@@ -63,6 +63,7 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
             static switch_time_t s_last_report = 0;
             static uint64_t s_inject_bytes = 0;
             static uint64_t s_underruns = 0;
+            static uint64_t s_lock_misses = 0;
 
             if (!frame || !frame->data || frame->datalen == 0 || !tech_pvt || !tech_pvt->inject_buffer) {
                 break;
@@ -73,48 +74,64 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
             switch_size_t to_read = 0;
             switch_size_t got = 0;
 
-            switch_mutex_lock(tech_pvt->mutex);
+            /* Only consume if we can fill the whole frame; partial frames cause audible artifacts.
+             * If we can't provide a full frame right now, inject silence.
+             */
+            const switch_size_t need_full = need;
 
-            avail = switch_buffer_inuse(tech_pvt->inject_buffer);
-            to_read = (avail > need) ? need : avail;
-            if (to_read > 0) {
-                got = switch_buffer_read(tech_pvt->inject_buffer, frame->data, to_read);
+            /*
+             * CRITICAL: This callback runs on FS media timing.
+             * Never block here. If we can't get the mutex immediately, inject silence.
+             */
+            if (switch_mutex_trylock(tech_pvt->inject_mutex ? tech_pvt->inject_mutex : tech_pvt->mutex) == SWITCH_STATUS_SUCCESS) {
+                avail = switch_buffer_inuse(tech_pvt->inject_buffer);
+                if (avail >= need_full) {
+                    to_read = need_full;
+                    got = switch_buffer_read(tech_pvt->inject_buffer, frame->data, to_read);
+                }
+                switch_mutex_unlock(tech_pvt->inject_mutex ? tech_pvt->inject_mutex : tech_pvt->mutex);
+            } else {
+                s_lock_misses++;
+                atomic_fetch_add(&tech_pvt->inject_lock_misses, 1);
             }
-
-            switch_mutex_unlock(tech_pvt->mutex);
 
             if (got < need) {
                 memset(((unsigned char *)frame->data) + got, 0, need - got);
                 s_underruns++;
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session),
-                                  SWITCH_LOG_DEBUG,
-                                  "(%s) PUSHBACK underrun: need=%lu got=%lu avail_before=%lu\n",
-                                  switch_core_session_get_uuid(session),
-                                  (unsigned long)need,
-                                  (unsigned long)got,
-                                  (unsigned long)avail);
+                atomic_fetch_add(&tech_pvt->inject_frames_starved, 1);
+                /* Avoid logging from the media thread; use periodic stats below instead */
             }
 
             switch_core_media_bug_set_write_replace_frame(bug, frame);
 
             s_write_calls++;
             s_inject_bytes += got;
+            if (got > 0) {
+                atomic_fetch_add(&tech_pvt->inject_bytes_read, (unsigned long long)got);
+            }
 
             const switch_time_t now = switch_micro_time_now();
             if (!s_last_report) s_last_report = now;
             if ((now - s_last_report) > 1000000) {
+                const unsigned long long w = atomic_load(&tech_pvt->inject_bytes_written);
+                const unsigned long long r = atomic_load(&tech_pvt->inject_bytes_read);
+                const unsigned long long st = atomic_load(&tech_pvt->inject_frames_starved);
+                const unsigned long long lm = atomic_load(&tech_pvt->inject_lock_misses);
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session),
                                   SWITCH_LOG_INFO,
-                                  "(%s) PUSHBACK consume: write_calls=%u bytes_read=%llu underruns=%llu inject_inuse_now=%lu\n",
+                                  "(%s) PUSHBACK consume: write_calls=%u bytes_read=%llu underruns=%llu lock_misses=%llu inject_inuse_now=%lu totals{written=%llu read=%llu starved=%llu lock_misses=%llu}\n",
                                   switch_core_session_get_uuid(session),
                                   (unsigned)s_write_calls,
                                   (unsigned long long)s_inject_bytes,
                                   (unsigned long long)s_underruns,
-                                  (unsigned long)switch_buffer_inuse(tech_pvt->inject_buffer));
+                                  (unsigned long long)s_lock_misses,
+                                  (unsigned long)switch_buffer_inuse(tech_pvt->inject_buffer),
+                                  w, r, st, lm);
                 s_last_report = now;
                 s_write_calls = 0;
                 s_inject_bytes = 0;
                 s_underruns = 0;
+                s_lock_misses = 0;
             }
         }
         break;
