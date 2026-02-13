@@ -43,13 +43,6 @@ void ElevenLabsTTS::build_url() {
 }
 
 std::string ElevenLabsTTS::compute_output_format(int sample_rate) {
-    /*
-     * ElevenLabs API only supports: pcm_16000, pcm_22050, pcm_24000, pcm_44100.
-     * Pick the LOWEST format that is >= requested rate to minimize bandwidth,
-     * then let the caller resample down to the actual desired rate.
-     * The output_sr_ will reflect the TRUE API rate, and the engine
-     * will resample from that to the FreeSWITCH rate.
-     */
     if (sample_rate <= 16000) return "pcm_16000";
     if (sample_rate <= 22050) return "pcm_22050";
     if (sample_rate <= 24000) return "pcm_24000";
@@ -305,7 +298,6 @@ size_t OpenAITTS::curl_write_callback(char* ptr, size_t size, size_t nmemb, void
         return 0;
     }
 
-    /* Skip body processing if HTTP error was detected */
     if (ctx->had_error) {
         return total;
     }
@@ -324,7 +316,6 @@ size_t OpenAITTS::curl_write_callback(char* ptr, size_t size, size_t nmemb, void
         ctx->pcm_buffer_pos += chunk_bytes;
     }
 
-    /* Compact buffer periodically to prevent unbounded growth */
     if (ctx->pcm_buffer_pos > 8192) {
         ctx->pcm_buffer.erase(
             ctx->pcm_buffer.begin(),
@@ -460,11 +451,6 @@ void FailoverTTS::configure(const TTSConfig& cfg) {
 }
 
 int FailoverTTS::output_sample_rate() const {
-    /*
-     * Return the sample rate of whichever engine will actually be used next.
-     * This avoids a race where the caller gets primary's SR but failover
-     * triggers and actually uses fallback's SR.
-     */
     int failures = consecutive_failures_.load(std::memory_order_relaxed);
     if (failures >= kFailoverThreshold && fallback_) {
         return fallback_->output_sample_rate();

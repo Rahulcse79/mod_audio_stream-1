@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<include>
+  <context name="default">
+
+    <!-- AI Voice Agent Extension -->
+    <extension name="ai_voice_agent">
+      <condition field="destination_number" expression="^1234$">
+
+        <action application="set" data="AI_OPENAI_API_KEY="/>
+        <action application="set" data="AI_TTS_PROVIDER="/>
+        <action application="set" data="AI_ELEVENLABS_API_KEY="/>
+        <action application="set" data="AI_ELEVENLABS_VOICE_ID="/>
+        <action application="set" data="AI_OPENAI_MODEL="/>
+        <action application="set" data="AI_SYSTEM_PROMPT=You are a helpful phone assistant for Acme Corp. Be brief and conversational. Start by greeting the caller and asking how you can help."/>
+        <action application="set" data="AI_ENABLE_BARGE_IN=1"/>
+        <action application="set" data="AI_DSP_ENABLED=1"/>
+        <action application="set" data="AI_VAD_SILENCE_DURATION_MS=500"/>
+        <action application="set" data="AI_ENABLE_TTS_CACHE=1"/>
+        <action application="set" data="AI_DEBUG=1"/>
+
+        <action application="answer"/>
+        <action application="sleep" data="500"/>
+
+        <!-- Start AI engine as a proper dialplan application -->
+        <action application="audio_stream_ai"/>
+
+      </condition>
+    </extension>
+
+    <!-- Include other default context extensions -->
+    <X-PRE-PROCESS cmd="include" data="default/*.xml"/>
+
+  </context>
+</include>

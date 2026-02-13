@@ -138,13 +138,11 @@ Also added a second cleanup check after re-acquiring the mutex for the buffer wr
 
 **Before:**
 ```c
-// 12 lines: re-lock, read remaining, zero buffer, rewrite in order
 ```
 
 **After:**
 ```c
 memcpy(frame->data, inj, got);
-/* remainder already zeroed by the memset(inj, 0, need) above */
 ```
 
 ---

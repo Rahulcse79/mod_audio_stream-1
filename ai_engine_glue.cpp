@@ -142,11 +142,6 @@ switch_status_t ai_engine_session_init(switch_core_session_t *session,
         return SWITCH_STATUS_FALSE;
     }
 
-    /*
-     * AI mode uses AIEngine's internal SPSCRingBuffer for audio injection,
-     * NOT tech_pvt->inject_buffer. The inject_buffer and scratch buffers
-     * are only needed for the WebSocket streaming mode. Skip allocation.
-     */
     tech_pvt->inject_buffer = NULL;
     tech_pvt->inject_sample_rate = sampling;
     tech_pvt->inject_bytes_per_sample = 2;

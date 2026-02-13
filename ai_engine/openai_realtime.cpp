@@ -23,8 +23,6 @@ extern "C" {
 
 namespace ai_engine {
 
-/* ---------- Robust JSON helpers ---------- */
-
 static size_t skip_ws(const std::string& s, size_t pos) {
     while (pos < s.size() && (s[pos] == ' ' || s[pos] == '\t' ||
                               s[pos] == '\n' || s[pos] == '\r'))
@@ -118,8 +116,6 @@ std::string OpenAIRealtimeClient::base64_encode_pcm(const int16_t* samples,
     return base64_encode(data, bytes);
 }
 
-/* ---------- Lifecycle ---------- */
-
 OpenAIRealtimeClient::OpenAIRealtimeClient()
     : ws_(std::make_unique<WebSocketClient>())
 {
@@ -200,8 +196,6 @@ bool OpenAIRealtimeClient::is_connected() const {
     return connected_.load(std::memory_order_acquire);
 }
 
-/* ---------- Send methods ---------- */
-
 void OpenAIRealtimeClient::send_audio(const int16_t* samples, size_t num_samples) {
     if (!is_connected() || !samples || num_samples == 0) return;
     std::string b64 = base64_encode_pcm(samples, num_samples);
@@ -244,8 +238,6 @@ void OpenAIRealtimeClient::send_text_message(const std::string& text) {
     ws_->sendMessage(oss.str());
     ws_->sendMessage("{\"type\":\"response.create\"}");
 }
-
-/* ---------- Session update ---------- */
 
 void OpenAIRealtimeClient::send_session_update() {
     std::string config = build_session_config();
@@ -300,13 +292,11 @@ std::string OpenAIRealtimeClient::build_session_config() const {
     return oss.str();
 }
 
-/* ---------- Message handler ---------- */
 
 void OpenAIRealtimeClient::handle_message(const std::string& message) {
     std::string type = json_get_string(message, "type");
     if (type.empty()) return;
 
-    /* session.created */
     if (type == "session.created") {
         std::string session_obj = json_get_object(message, "session");
         if (!session_obj.empty()) {
@@ -320,14 +310,12 @@ void OpenAIRealtimeClient::handle_message(const std::string& message) {
         return;
     }
 
-    /* session.updated */
     if (type == "session.updated") {
         session_configured_.store(true, std::memory_order_release);
         OAI_LOG_INFO("OpenAI Realtime: session configured\n");
         return;
     }
 
-    /* VAD events */
     if (type == "input_audio_buffer.speech_started") {
         is_speech_active_.store(true, std::memory_order_release);
         if (cb_speech_started_) cb_speech_started_();
@@ -339,7 +327,6 @@ void OpenAIRealtimeClient::handle_message(const std::string& message) {
         return;
     }
 
-    /* Input transcription */
     if (type == "conversation.item.input_audio_transcription.completed") {
         std::string transcript = json_get_string(message, "transcript");
         if (cb_input_transcript_ && !transcript.empty())
@@ -354,7 +341,6 @@ void OpenAIRealtimeClient::handle_message(const std::string& message) {
         return;
     }
 
-    /* Response lifecycle */
     if (type == "response.created") {
         std::string resp = json_get_object(message, "response");
         if (!resp.empty()) current_response_id_ = json_get_string(resp, "id");
@@ -364,7 +350,6 @@ void OpenAIRealtimeClient::handle_message(const std::string& message) {
         return;
     }
 
-    /* Text deltas */
     if (type == "response.text.delta" || type == "response.audio_transcript.delta") {
         std::string delta = json_get_string(message, "delta");
         if (!delta.empty()) {
@@ -378,13 +363,11 @@ void OpenAIRealtimeClient::handle_message(const std::string& message) {
         return;
     }
 
-    /* Informational response events */
     if (type == "response.output_item.added" || type == "response.content_part.added" ||
         type == "response.output_item.done" || type == "response.content_part.done") {
         return;
     }
 
-    /* Response done */
     if (type == "response.done") {
         is_responding_.store(false, std::memory_order_release);
         if (cb_response_done_) cb_response_done_(current_response_text_, current_response_id_);
@@ -393,7 +376,6 @@ void OpenAIRealtimeClient::handle_message(const std::string& message) {
         return;
     }
 
-    /* Response cancelled */
     if (type == "response.cancelled" || type == "response.interrupted") {
         is_responding_.store(false, std::memory_order_release);
         if (cb_response_interrupted_) cb_response_interrupted_();
@@ -401,7 +383,6 @@ void OpenAIRealtimeClient::handle_message(const std::string& message) {
         return;
     }
 
-    /* Errors */
     if (type == "error") {
         std::string error_msg, error_code;
         std::string err_obj = json_get_object(message, "error");
@@ -419,10 +400,9 @@ void OpenAIRealtimeClient::handle_message(const std::string& message) {
         return;
     }
 
-    /* Rate limits (ignore) */
     if (type == "rate_limits.updated") return;
 
     OAI_LOG_DEBUG("OpenAI Realtime: unhandled event: %s\n", type.c_str());
 }
 
-} /* namespace ai_engine */
+}

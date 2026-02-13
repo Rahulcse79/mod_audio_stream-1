@@ -212,14 +212,12 @@ void AIEngine::feed_audio(const int16_t* samples, size_t num_samples) {
     if (!running_.load(std::memory_order_relaxed)) return;
     if (!samples || num_samples == 0) return;
 
-    /* Resample under resampler_mutex_ (already protected) */
     std::vector<int16_t> upsampled;
     if (upsample_resampler_) {
         resample_up(samples, num_samples, upsampled);
         if (upsampled.empty()) return;
     }
 
-    /* Access openai_ under openai_mutex_ to prevent race with reconnect thread */
     {
         std::lock_guard<std::mutex> lock(openai_mutex_);
         if (!openai_ || !openai_->is_connected()) return;
@@ -239,22 +237,15 @@ void AIEngine::feed_audio(const int16_t* samples, size_t num_samples) {
 size_t AIEngine::read_audio(int16_t* dest, size_t num_samples) {
     if (!ring_buffer_ || !dest || num_samples == 0) return 0;
 
-    /* Check if barge-in requested a flush — execute from consumer thread */
     ring_buffer_->check_flush_request();
 
-    /* Try to read exactly the requested number of samples */
     if (ring_buffer_->read_pcm16(dest, num_samples)) {
         return num_samples;
     }
 
-    /*
-     * If we couldn't get a full frame, try to read whatever is available.
-     * This prevents audio gaps when the ring buffer has partial data.
-     */
     size_t avail = ring_buffer_->available_samples();
     if (avail > 0 && avail < num_samples) {
         if (ring_buffer_->read_pcm16(dest, avail)) {
-            /* Zero-fill the remainder */
             memset(dest + avail, 0, (num_samples - avail) * sizeof(int16_t));
             return num_samples;
         }
@@ -280,17 +271,10 @@ void AIEngine::handle_barge_in() {
         }
     }
 
-    /* Set abort flag — TTS worker will see this and skip current work */
     tts_abort_.store(true, std::memory_order_release);
 
     flush_tts_queue();
 
-    /*
-     * Request flush via atomic flag — the consumer (media thread)
-     * will execute the actual flush on its next read_audio() call.
-     * This avoids violating the SPSC contract by modifying the tail
-     * from a non-consumer thread.
-     */
     if (ring_buffer_) {
         ring_buffer_->request_flush();
     }
@@ -300,11 +284,6 @@ void AIEngine::handle_barge_in() {
         sentence_buffer_.reset();
     }
 
-    /*
-     * Give the TTS worker time to observe the abort flag before clearing it.
-     * The worker checks tts_abort_ at the top of each iteration and before
-     * each TTS chunk callback, so a short sleep is sufficient.
-     */
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     tts_abort_.store(false, std::memory_order_release);
 
@@ -463,7 +442,6 @@ void AIEngine::on_openai_connection_change(bool connected) {
                             cfg_.session_uuid.c_str(), delay_ms,
                             retries + 1, kMaxReconnectAttempts);
 
-                /* Use a joinable thread, replacing any previous reconnect thread */
                 {
                     std::lock_guard<std::mutex> rlock(reconnect_mutex_);
                     if (reconnect_thread_.joinable()) {
@@ -477,11 +455,6 @@ void AIEngine::on_openai_connection_change(bool connected) {
                                         cfg_.session_uuid.c_str());
                             set_state(AIEngineState::CONNECTING, "Reconnecting");
 
-                            /*
-                             * Create a fresh WebSocket client for the reconnect.
-                             * Many WS libraries don't support reconnect on same
-                             * object after close/error. This guarantees clean state.
-                             */
                             {
                                 std::lock_guard<std::mutex> olock(openai_mutex_);
                                 if (openai_) {
@@ -583,13 +556,6 @@ void AIEngine::process_tts_item(const TTSWorkItem& item) {
     }
 
     std::vector<int16_t> cache_buffer;
-    /*
-     * Capture a mutable SR that can be updated by the TTS callback.
-     * With FailoverTTS, the primary might fail and fallback runs at a
-     * different sample rate. We get the correct SR by querying the engine
-     * AFTER synthesize() returns (which reflects which engine actually ran).
-     * But for streaming chunks we need a reasonable initial value.
-     */
     int tts_sr = tts_engine_->output_sample_rate();
 
     bool success = tts_engine_->synthesize(
@@ -609,11 +575,6 @@ void AIEngine::process_tts_item(const TTSWorkItem& item) {
         tts_abort_
     );
 
-    /*
-     * After synthesize returns, get the actual SR of whatever engine ran.
-     * This is used for caching — the cached entry must store the correct SR
-     * so on cache hit the resampler uses the right rate.
-     */
     tts_sr = tts_engine_->output_sample_rate();
 
     if (success && tts_cache_ && !cache_buffer.empty()) {
@@ -653,8 +614,6 @@ void AIEngine::on_tts_audio(const int16_t* samples, size_t count,
     if (resampled.empty()) return;
     dsp_.process(resampled.data(), resampled.size());
 
-    /* Re-check abort flag after resample + DSP processing to minimize
-     * stale audio written to ring buffer during barge-in. */
     if (tts_abort_.load(std::memory_order_acquire)) return;
 
     ring_buffer_->write_pcm16(resampled.data(), resampled.size());

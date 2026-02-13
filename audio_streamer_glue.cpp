@@ -700,7 +700,6 @@ private:
             bool need_new_resampler = false;
             SpeexResamplerState* old_resampler = nullptr;
 
-            /* Check under mutex whether we need a new resampler */
             switch_mutex_lock(tech_pvt->mutex);
             if (!tech_pvt->inject_resampler) {
                 need_new_resampler = true;
@@ -718,12 +717,10 @@ private:
             }
             switch_mutex_unlock(tech_pvt->mutex);
 
-            /* Destroy old resampler OUTSIDE mutex (heap free) */
             if (old_resampler) {
                 speex_resampler_destroy(old_resampler);
             }
 
-            /* Create new resampler OUTSIDE mutex (heap alloc + FIR computation) */
             if (need_new_resampler) {
                 int err = 0;
                 SpeexResamplerState* fresh = speex_resampler_init(out_channels, sampleRate, out_sr,
@@ -736,10 +733,8 @@ private:
                                   "(%s) processMessage: created inject resampler %d -> %d ch=%d quality=%d\n",
                                   m_sessionId.c_str(), sampleRate, out_sr, out_channels, INJECT_RESAMPLE_QUALITY);
 
-                /* Install under mutex */
                 switch_mutex_lock(tech_pvt->mutex);
                 if (tech_pvt->inject_resampler) {
-                    /* Another thread beat us — use theirs, destroy ours */
                     switch_mutex_unlock(tech_pvt->mutex);
                     speex_resampler_destroy(fresh);
                     switch_mutex_lock(tech_pvt->mutex);
@@ -750,7 +745,6 @@ private:
                 switch_mutex_unlock(tech_pvt->mutex);
             }
 
-            /* Defensive: verify resampler and session are still valid before use */
             if (!local_resampler ||
                 switch_atomic_read(&tech_pvt->close_requested) ||
                 switch_atomic_read(&tech_pvt->cleanup_started)) {
@@ -781,7 +775,6 @@ private:
 
         switch_mutex_lock(tech_pvt->mutex);
 
-        /* Re-check cleanup state under mutex before writing to inject_buffer */
         if (switch_atomic_read(&tech_pvt->close_requested) ||
             switch_atomic_read(&tech_pvt->cleanup_started) ||
             !tech_pvt->inject_buffer) {

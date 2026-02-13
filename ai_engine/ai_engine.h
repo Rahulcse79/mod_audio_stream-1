@@ -25,7 +25,6 @@ typedef struct SpeexResamplerState_ SpeexResamplerState;
 
 namespace ai_engine {
 
-/* ---- Shared JSON string escaping utility ---- */
 inline std::string json_escape(const std::string& s) {
     std::string out;
     out.reserve(s.size() + 16);

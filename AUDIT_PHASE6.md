@@ -61,27 +61,22 @@ INFO  [abc-123] LIFECYCLE session_cleanup duration_ms=12 mode=ws
 Rather than logging every frame, emit a periodic summary every N seconds:
 
 ```c
-/* Proposed telemetry structure for private_t */
 struct session_telemetry {
-    /* Capture path */
     uint64_t capture_frames;
     uint64_t capture_bytes;
     uint64_t capture_trylock_failures;
     
-    /* Inject path */
     uint64_t inject_messages;
     uint64_t inject_bytes;
     uint64_t inject_overflows;
     uint64_t inject_underruns;
     
-    /* Timing (microseconds) */
     uint64_t callback_time_sum_us;
     uint64_t callback_time_max_us;
     uint64_t callback_count;
     
-    /* Report interval */
     switch_time_t last_report;
-    int report_interval_ms;  /* default: 10000 (10s) */
+    int report_interval_ms; 
 };
 ```
 
@@ -166,23 +161,19 @@ Returns:
 Track active sessions in a global linked list protected by a global mutex:
 
 ```c
-/* Global session registry */
 static switch_mutex_t *g_session_mutex = NULL;
-static switch_hash_t *g_sessions = NULL;     /* uuid → private_t* */
+static switch_hash_t *g_sessions = NULL;   
 static uint64_t g_total_created = 0;
 static uint64_t g_total_destroyed = 0;
 
-/* In mod_audio_stream_load: */
 switch_mutex_init(&g_session_mutex, SWITCH_MUTEX_NESTED, pool);
 switch_core_hash_init(&g_sessions);
 
-/* In stream_data_init / ai_engine_session_init: */
 switch_mutex_lock(g_session_mutex);
 switch_core_hash_insert(g_sessions, tech_pvt->sessionId, tech_pvt);
 g_total_created++;
 switch_mutex_unlock(g_session_mutex);
 
-/* In cleanup: */
 switch_mutex_lock(g_session_mutex);
 switch_core_hash_delete(g_sessions, tech_pvt->sessionId);
 g_total_destroyed++;
@@ -202,7 +193,6 @@ switch_mutex_unlock(g_session_mutex);
 ```c
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_audio_stream_shutdown)
 {
-    /* Phase 1: Mark all sessions for shutdown */
     switch_mutex_lock(g_session_mutex);
     switch_hash_index_t *hi;
     for (hi = switch_core_hash_first(g_sessions); hi;
@@ -217,18 +207,16 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_audio_stream_shutdown)
     }
     switch_mutex_unlock(g_session_mutex);
 
-    /* Phase 2: Wait for sessions to drain (max 5 seconds) */
     int wait_ms = 0;
     while (wait_ms < 5000) {
         switch_mutex_lock(g_session_mutex);
         int remaining = switch_core_hash_count(g_sessions);
         switch_mutex_unlock(g_session_mutex);
         if (remaining == 0) break;
-        switch_yield(100000);  /* 100ms */
+        switch_yield(100000); 
         wait_ms += 100;
     }
 
-    /* Phase 3: Force cleanup any remaining sessions */
     switch_mutex_lock(g_session_mutex);
     if (switch_core_hash_count(g_sessions) > 0) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
@@ -238,7 +226,6 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_audio_stream_shutdown)
     switch_core_hash_destroy(&g_sessions);
     switch_mutex_unlock(g_session_mutex);
 
-    /* Phase 4: Free events */
     switch_event_free_subclass(EVENT_JSON);
     switch_event_free_subclass(EVENT_CONNECT);
     switch_event_free_subclass(EVENT_DISCONNECT);
@@ -273,9 +260,9 @@ HALF_OPEN: After cooldown, allow one probe connection.
 
 ```c
 struct circuit_breaker_config {
-    int failure_threshold;    /* 5 — open after 5 failures */
-    int cooldown_sec;         /* 30 — wait 30s before half-open */
-    int window_sec;           /* 60 — failure window */
+    int failure_threshold;    
+    int cooldown_sec;         
+    int window_sec;           
 };
 ```
 
@@ -295,27 +282,26 @@ For ElevenLabs/OpenAI TTS API failures:
 Already partially implemented (`kMaxReconnectAttempts = 5`). Enhance with:
 
 ```cpp
-/* In AIEngine: */
 struct ReconnectCircuitBreaker {
     std::atomic<int> consecutive_failures{0};
-    std::atomic<int> state{0};  /* 0=CLOSED, 1=OPEN, 2=HALF_OPEN */
+    std::atomic<int> state{0};  
     std::chrono::steady_clock::time_point last_failure;
     static constexpr int THRESHOLD = 5;
     static constexpr int COOLDOWN_SEC = 60;
     
     bool should_attempt() {
         int s = state.load(std::memory_order_acquire);
-        if (s == 0) return true;  /* CLOSED */
-        if (s == 1) {  /* OPEN */
+        if (s == 0) return true;  
+        if (s == 1) { 
             auto now = std::chrono::steady_clock::now();
             if (std::chrono::duration_cast<std::chrono::seconds>(
                     now - last_failure).count() > COOLDOWN_SEC) {
                 state.store(2, std::memory_order_release);
-                return true;  /* HALF_OPEN */
+                return true;  
             }
             return false;
         }
-        return true;  /* HALF_OPEN — allow probe */
+        return true;  
     }
     
     void record_success() {
@@ -342,31 +328,24 @@ struct ReconnectCircuitBreaker {
 Detect stalled capture paths:
 
 ```c
-/* In private_t: */
 switch_time_t last_capture_frame_time;
 
-/* In stream_frame: */
 tech_pvt->last_capture_frame_time = switch_micro_time_now();
 
-/* In periodic check (every 5s): */
 if (switch_micro_time_now() - tech_pvt->last_capture_frame_time > 5000000) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
         "(%s) WATCHDOG: Capture stalled for >5s\n", tech_pvt->sessionId);
-    /* Fire alarm event */
 }
 ```
 
 ### 5.2 AI Engine Watchdog
 
 ```cpp
-/* In AIEngine: */
 std::atomic<uint64_t> last_activity_us_{0};
 
-/* Updated in feed_audio, read_audio, on_tts_audio: */
 last_activity_us_.store(current_us, std::memory_order_relaxed);
 
-/* Watchdog thread or periodic check: */
-bool is_stalled(uint64_t timeout_us = 30000000) const {  /* 30s */
+bool is_stalled(uint64_t timeout_us = 30000000) const { 
     uint64_t last = last_activity_us_.load(std::memory_order_relaxed);
     if (last == 0) return false;
     return (current_us() - last) > timeout_us;
@@ -378,7 +357,6 @@ bool is_stalled(uint64_t timeout_us = 30000000) const {  /* 30s */
 Detect hung TTS HTTP requests:
 
 ```cpp
-/* In process_tts_item: */
 auto start = std::chrono::steady_clock::now();
 bool success = tts_engine_->synthesize(...);
 auto elapsed = std::chrono::steady_clock::now() - start;
@@ -412,14 +390,10 @@ if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() > 30) {
 ### 6.2 Scoped Mutex Lock (C-compatible)
 
 ```c
-/* Cleanup handler pattern for switch_mutex */
 #define SCOPED_MUTEX_LOCK(mutex) \
     switch_mutex_lock(mutex); \
-    /* Must unlock before any return */
-
-/* Preferred: use goto cleanup pattern */
+    
 switch_mutex_lock(tech_pvt->mutex);
-/* ... work ... */
 status = SWITCH_STATUS_SUCCESS;
 cleanup:
 switch_mutex_unlock(tech_pvt->mutex);
@@ -429,7 +403,6 @@ return status;
 ### 6.3 Rate-Limited Logging
 
 ```c
-/* Log at most once per interval */
 static inline bool should_log(switch_time_t *last, int interval_ms) {
     switch_time_t now = switch_micro_time_now();
     if (now - *last > (switch_time_t)interval_ms * 1000) {
@@ -439,7 +412,6 @@ static inline bool should_log(switch_time_t *last, int interval_ms) {
     return false;
 }
 
-/* Usage: */
 static switch_time_t last_overflow_log = 0;
 if (overflow && should_log(&last_overflow_log, 5000)) {
     switch_log_printf(..., "inject buffer overflow ...");
@@ -497,7 +469,7 @@ static switch_status_t validate_ai_config(ai_engine_config_t *cfg, const char *s
         cfg->max_response_tokens = 4096;
     }
     if (cfg->compressor_threshold_db > 0.0f) {
-        cfg->compressor_threshold_db = -20.0f;  /* Must be negative */
+        cfg->compressor_threshold_db = -20.0f;  
     }
     if (cfg->lpf_cutoff_hz < 100.0f || cfg->lpf_cutoff_hz > 20000.0f) {
         cfg->lpf_cutoff_hz = 8000.0f;
@@ -567,9 +539,6 @@ Enhanced:
 ### 9.2 Deployment Configuration
 
 ```ini
-# Recommended FreeSWITCH channel variables for production
-
-# WS Streaming Mode
 AUDIO_STREAM_SAMPLING=8000
 AUDIO_STREAM_CHANNELS=1
 AUDIO_STREAM_RTP_PACKETS=1
@@ -579,7 +548,6 @@ AUDIO_STREAM_INJECT_LOG_EVERY_MS=10000
 AUDIO_STREAM_MAX_AUDIO_BASE64_LEN=1000000
 AUDIO_STREAM_RECONNECT_MAX=3
 
-# AI Mode
 AUDIO_STREAM_AI_OPENAI_MODEL=gpt-4o-realtime-preview
 AUDIO_STREAM_AI_VAD_THRESHOLD=0.5
 AUDIO_STREAM_AI_VAD_PREFIX_PADDING_MS=300
@@ -626,7 +594,6 @@ AUDIO_STREAM_AI_ENABLE_TTS_CACHE=true
 Embed build metadata in the module for operational debugging:
 
 ```c
-/* In mod_audio_stream.c */
 static const char *MOD_VERSION = "1.1.0";
 static const char *MOD_BUILD_DATE = __DATE__ " " __TIME__;
 #ifdef NDEBUG
@@ -635,7 +602,6 @@ static const char *MOD_BUILD_TYPE = "release";
 static const char *MOD_BUILD_TYPE = "debug";
 #endif
 
-/* Add to global_health output */
 ```
 
 ---

@@ -271,13 +271,11 @@ static switch_status_t do_stop(switch_core_session_t *session, char* text)
 {
     switch_channel_t *channel = switch_core_session_get_channel(session);
 
-    /* Check AI bug first */
     switch_media_bug_t *ai_bug = (switch_media_bug_t *)switch_channel_get_private(channel, MY_BUG_NAME_AI);
     if (ai_bug) {
         return ai_engine_session_cleanup(session, 0);
     }
 
-    /* Then check regular streaming bug */
     switch_media_bug_t *bug = (switch_media_bug_t *)switch_channel_get_private(channel, MY_BUG_NAME);
     if (bug) {
         return stream_session_cleanup(session, text, 0);
@@ -474,11 +472,6 @@ done:
     return SWITCH_STATUS_SUCCESS;
 }
 
-/*
- * Dialplan application: starts the AI voice agent on the current session.
- * Usage: <action application="audio_stream_ai"/>
- * The app starts AI capture, then plays silence to keep the channel open.
- */
 SWITCH_STANDARD_APP(audio_stream_ai_app_function)
 {
     switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -499,9 +492,6 @@ SWITCH_STANDARD_APP(audio_stream_ai_app_function)
                       "(%s) audio_stream_ai app: AI engine started, playing silence to hold channel\n",
                       switch_core_session_get_uuid(session));
 
-    /* Play infinite silence to keep the channel alive.
-     * The media bug handles read/write frames in the background.
-     * When the caller hangs up, the bug CLOSE callback cleans up. */
     switch_ivr_play_file(session, NULL, "silence_stream://-1", NULL);
 }
 
