@@ -96,8 +96,8 @@ add_subdirectory(libs/libwsc)
 add_library(mod_audio_stream SHARED 
     mod_audio_stream.c
     mod_audio_stream.h
-    audio_streamer_glue.h
-    audio_streamer_glue.cpp
+    external_audio_inject.h
+    external_audio_inject.cpp
     base64.cpp
 )
 

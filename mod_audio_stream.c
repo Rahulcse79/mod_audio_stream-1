@@ -1,6 +1,37 @@
-#include "mod_audio_stream.h"
-#include "audio_streamer_glue.h"
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * mod_audio_stream.c
+ *
+ * FreeSWITCH module: External WebSocket Audio Injector
+ *
+ * This module provides ONE API command:
+ *
+ *   uuid_ext_audio_inject <uuid> start <ws-uri>
+ *   uuid_ext_audio_inject <uuid> stop
+ *   uuid_ext_audio_inject <uuid> status
+ *
+ * HOW IT WORKS:
+ *   1. You dial into FreeSWITCH (e.g. call extension 1234)
+ *   2. From fs_cli or ESL, run:
+ *        uuid_ext_audio_inject <UUID> start ws://yourserver:8777
+ *   3. The module connects to the WebSocket server
+ *   4. When the server sends { type:"audio_chunk", callId:"<UUID>",
+ *      sampleRate:8000, audioData:"<base64 PCM-16-LE>" }
+ *      → the caller hears that audio
+ *   5. If the WebSocket disconnects, it retries every 10 seconds
+ *   6. Logs status every 30 seconds in FreeSWITCH console
+ *
+ * BUILD:
+ *   mkdir build && cd build
+ *   cmake .. && make
+ *   sudo cp mod_audio_stream.so /usr/local/freeswitch/mod/
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
 
+#include "mod_audio_stream.h"
+#include "external_audio_inject.h"
+
+/* ── Module lifecycle declarations ── */
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_audio_stream_shutdown);
 SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load);
 
@@ -11,346 +42,69 @@ SWITCH_MODULE_DEFINITION(
     NULL
 );
 
-static void responseHandler(switch_core_session_t* session,
-                            const char* eventName,
-                            const char* json)
+/* ── API syntax ── */
+#define EXT_INJECT_API_SYNTAX \
+    "<uuid> start <ws-uri> | <uuid> stop | <uuid> status"
+
+/**
+ * uuid_ext_audio_inject API handler
+ *
+ * Commands:
+ *   uuid_ext_audio_inject <uuid> start ws://server:8777
+ *   uuid_ext_audio_inject <uuid> stop
+ *   uuid_ext_audio_inject <uuid> status
+ */
+SWITCH_STANDARD_API(ext_audio_inject_function)
 {
-    switch_event_t *event;
-    switch_channel_t *channel = switch_core_session_get_channel(session);
-
-    switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, eventName);
-    switch_channel_event_set_data(channel, event);
-    if (json) {
-        switch_event_add_body(event, "%s", json);
-    }
-    switch_event_fire(&event);
-}
-
-static switch_bool_t capture_callback(switch_media_bug_t *bug,
-                                      void *user_data,
-                                      switch_abc_type_t type)
-{
-    switch_core_session_t *session =
-        switch_core_media_bug_get_session(bug);
-    private_t *tech_pvt = (private_t *) user_data;
-
-    if (!tech_pvt) return SWITCH_TRUE;
-
-    switch (type) {
-
-    case SWITCH_ABC_TYPE_INIT:
-        break;
-
-    case SWITCH_ABC_TYPE_CLOSE:
-        {
-            tech_pvt->close_requested = SWITCH_TRUE;
-
-            int channel_closing = 1;
-
-            stream_session_cleanup(session, NULL, channel_closing);
-        }
-        break;
-
-    case SWITCH_ABC_TYPE_READ:
-        if (tech_pvt->close_requested) {
-            return SWITCH_FALSE;
-        }
-        return stream_frame(bug);
-
-    case SWITCH_ABC_TYPE_WRITE_REPLACE:
-        {
-            switch_frame_t *frame =
-                switch_core_media_bug_get_write_replace_frame(bug);
-
-            if (!frame || !frame->data || frame->datalen == 0 || !tech_pvt) {
-                break;
-            }
-
-            switch_size_t need = frame->datalen;
-            switch_size_t avail = 0;
-            switch_size_t to_read = 0;
-            switch_size_t got = 0;
-
-            switch_mutex_lock(tech_pvt->mutex);
-
-            if (!tech_pvt->inject_buffer) {
-                switch_mutex_unlock(tech_pvt->mutex);
-                break;
-            }
-
-            if (!tech_pvt->inject_scratch || tech_pvt->inject_scratch_len < need) {
-                uint8_t *nbuf = (uint8_t *)switch_core_session_alloc(session, need);
-                if (!nbuf) {
-                    switch_mutex_unlock(tech_pvt->mutex);
-                    break;
-                }
-                tech_pvt->inject_scratch = nbuf;
-                tech_pvt->inject_scratch_len = need;
-            }
-
-            uint8_t *inj = tech_pvt->inject_scratch;
-            memset(inj, 0, need);
-
-            avail = switch_buffer_inuse(tech_pvt->inject_buffer);
-
-            if (tech_pvt->cfg.inject_min_buffer_ms > 0 && tech_pvt->inject_sample_rate > 0) {
-                const switch_size_t bytes_per_ms = (switch_size_t)tech_pvt->inject_sample_rate * 2u * (switch_size_t)tech_pvt->channels / 1000u;
-                const switch_size_t min_bytes = bytes_per_ms * (switch_size_t)tech_pvt->cfg.inject_min_buffer_ms;
-                if (avail < min_bytes) {
-                    to_read = 0;
-                } else {
-                    to_read = (avail > need) ? need : avail;
-                }
-            } else {
-                to_read = (avail > need) ? need : avail;
-            }
-            if (to_read > 0) {
-                got = switch_buffer_read(tech_pvt->inject_buffer, inj, to_read);
-            }
-
-            /* Update stats under mutex to avoid data races */
-            if (got < need) {
-                tech_pvt->inject_underruns++;
-            }
-            tech_pvt->inject_write_calls++;
-            tech_pvt->inject_bytes += got;
-
-            /* Capture inject_buffer inuse while we still hold mutex */
-            const unsigned long inject_inuse_now = tech_pvt->inject_buffer ?
-                (unsigned long)switch_buffer_inuse(tech_pvt->inject_buffer) : 0;
-
-            switch_mutex_unlock(tech_pvt->mutex);
-
-            if (got > 0) {
-                /* Always replace: copy inject audio then silence-pad the remainder */
-                memcpy(frame->data, inj, got);
-                if (got < need) {
-                    memset((uint8_t *)frame->data + got, 0, need - got);
-                }
-            }
-
-            switch_core_media_bug_set_write_replace_frame(bug, frame);
-
-            {
-                const switch_time_t now = switch_micro_time_now();
-                if (!tech_pvt->inject_last_report) tech_pvt->inject_last_report = now;
-
-                /* Use configurable log interval (default 1000ms) */
-                const switch_time_t log_interval_us =
-                    (tech_pvt->cfg.inject_log_every_ms > 0 ? tech_pvt->cfg.inject_log_every_ms : 1000) * 1000LL;
-
-                if ((now - tech_pvt->inject_last_report) > log_interval_us) {
-                    switch_mutex_lock(tech_pvt->mutex);
-                    const uint64_t snap_calls = tech_pvt->inject_write_calls;
-                    const uint64_t snap_bytes = tech_pvt->inject_bytes;
-                    const uint64_t snap_under = tech_pvt->inject_underruns;
-                    tech_pvt->inject_write_calls = 0;
-                    tech_pvt->inject_bytes = 0;
-                    tech_pvt->inject_underruns = 0;
-                    switch_mutex_unlock(tech_pvt->mutex);
-
-                    const double loss_pct = snap_calls ?
-                        (100.0 * (double)snap_under / (double)snap_calls) : 0.0;
-
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session),
-                                      SWITCH_LOG_INFO,
-                                      "(%s) PUSHBACK consume: write_calls=%llu bytes_read=%llu underruns=%llu loss%%=%.1f inject_inuse_now=%lu\n",
-                                      switch_core_session_get_uuid(session),
-                                      (unsigned long long)snap_calls,
-                                      (unsigned long long)snap_bytes,
-                                      (unsigned long long)snap_under,
-                                      loss_pct,
-                                      inject_inuse_now);
-                    tech_pvt->inject_last_report = now;
-                }
-            }
-        }
-        break;
-
-    default:
-        break;
-    }
-
-    return SWITCH_TRUE;
-}
-
-static int get_channel_var_int(switch_core_session_t *session, const char* name, int def)
-{
-    switch_channel_t *channel = switch_core_session_get_channel(session);
-    const char* val = channel ? switch_channel_get_variable(channel, name) : NULL;
-    if (!val || !*val) return def;
-    return atoi(val);
-}
-
-static switch_status_t start_capture(switch_core_session_t *session,
-                                     switch_media_bug_flag_t flags,
-                                     char* wsUri,
-                                     int sampling,
-                                     char* metadata)
-{
-    switch_channel_t *channel =
-        switch_core_session_get_channel(session);
-
-    switch_media_bug_t *bug;
-    switch_codec_t *read_codec;
-    void *pUserData = NULL;
-
-    int channels = (flags & SMBF_STEREO) ? 2 : 1;
-
-    if (switch_channel_get_private(channel, MY_BUG_NAME)) {
-        return SWITCH_STATUS_FALSE;
-    }
-
-    if (switch_channel_pre_answer(channel)
-        != SWITCH_STATUS_SUCCESS) {
-        return SWITCH_STATUS_FALSE;
-    }
-
-    read_codec = switch_core_session_get_read_codec(session);
-
-    if (!read_codec || !read_codec->implementation) {
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                          "start_capture: no read codec or implementation\n");
-        return SWITCH_STATUS_FALSE;
-    }
-
-    if (stream_session_init(
-            session,
-            responseHandler,
-            read_codec->implementation->actual_samples_per_second,
-            wsUri,
-            sampling,
-            channels,
-            metadata,
-            &pUserData
-        ) != SWITCH_STATUS_SUCCESS) {
-        return SWITCH_STATUS_FALSE;
-    }
-
-    flags |= SMBF_READ_STREAM;
-    flags |= SMBF_WRITE_REPLACE;
-
-    if (switch_core_media_bug_add(
-            session,
-            MY_BUG_NAME,
-            NULL,
-            capture_callback,
-            pUserData,
-            0,
-            flags,
-            &bug
-        ) != SWITCH_STATUS_SUCCESS) {
-        /* Clean up the AudioStreamer that stream_session_init created */
-        stream_session_cleanup(session, NULL, 0);
-        return SWITCH_STATUS_FALSE;
-    }
-
-    switch_channel_set_private(channel, MY_BUG_NAME, bug);
-    return SWITCH_STATUS_SUCCESS;
-}
-
-static switch_status_t do_stop(switch_core_session_t *session, char* text)
-{
-    return stream_session_cleanup(session, text, 0);
-}
-
-static switch_status_t do_pauseresume(switch_core_session_t *session, int pause)
-{
-    return stream_session_pauseresume(session, pause);
-}
-
-static switch_status_t send_text(switch_core_session_t *session, char* text)
-{
-    return stream_session_send_text(session, text);
-}
-
-#define STREAM_API_SYNTAX \
-"<uuid> start <ws-uri> [mono|mixed|stereo] [8000|16000|24000|32000|48000] [metadata]"
-
-SWITCH_STANDARD_API(stream_function)
-{
-    char *argv[6] = { 0 };
+    char *argv[4] = { 0 };
     char *mycmd = NULL;
     int argc = 0;
     switch_status_t status = SWITCH_STATUS_FALSE;
 
     if (!zstr(cmd) && (mycmd = strdup(cmd))) {
-        argc = switch_separate_string(mycmd, ' ', argv, 6);
+        argc = switch_separate_string(mycmd, ' ', argv, 4);
     }
 
     if (argc < 2) {
-        stream->write_function(stream, "-USAGE: %s\n", STREAM_API_SYNTAX);
+        stream->write_function(stream, "-USAGE: %s\n", EXT_INJECT_API_SYNTAX);
         goto done;
     }
 
-    switch_core_session_t *lsession =
-        switch_core_session_locate(argv[0]);
-
-    if (!lsession) goto done;
-
-    if (!strcasecmp(argv[1], "stop")) {
-        status = do_stop(lsession, argc > 2 ? argv[2] : NULL);
-    }
-    else if (!strcasecmp(argv[1], "pause")) {
-        status = do_pauseresume(lsession, 1);
-    }
-    else if (!strcasecmp(argv[1], "resume")) {
-        status = do_pauseresume(lsession, 0);
-    }
-    else if (!strcasecmp(argv[1], "send_text")) {
-        status = (argc > 2 && argv[2]) ? send_text(lsession, argv[2]) : SWITCH_STATUS_FALSE;
-    }
-    else if (!strcasecmp(argv[1], "start")) {
-
-    char wsUri[MAX_WS_URI];
-    int sampling = 8000;
-    switch_media_bug_flag_t flags = SMBF_READ_STREAM;
-    int channels = 1;
-
-        if (argc < 3 || !argv[2] || !validate_ws_uri(argv[2], wsUri)) {
-            switch_core_session_rwunlock(lsession);
+    /* ── START ── */
+    if (!strcasecmp(argv[1], "start")) {
+        if (argc < 3 || !argv[2]) {
+            stream->write_function(stream,
+                "-USAGE: uuid_ext_audio_inject <uuid> start <ws-uri>\n");
             goto done;
         }
 
-        if (argc > 3 && argv[3]) {
-            if (!strcasecmp(argv[3], "mono")) {
-                channels = 1;
-            } else if (!strcasecmp(argv[3], "mixed")) {
-#ifdef SMBF_OPT_MIXED_READ
-                flags |= SMBF_OPT_MIXED_READ;
-#else
-                /* Some FreeSWITCH builds don't expose SMBF_OPT_MIXED_READ; fall back to normal read stream. */
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(lsession), SWITCH_LOG_WARNING,
-                                  "(%s) 'mixed' requested but SMBF_OPT_MIXED_READ not available; falling back to mono.\n",
-                                  switch_core_session_get_uuid(lsession));
-#endif
-                channels = 1;
-            } else if (!strcasecmp(argv[3], "stereo")) {
-                flags |= SMBF_STEREO;
-                channels = 2;
-            }
-        }
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+                          "[mod_audio_stream] API: start uuid=%s ws_uri=%s\n",
+                          argv[0], argv[2]);
 
-        if (argc > 4) {
-            sampling = atoi(argv[4]);
-            if (sampling != 8000 && sampling != 16000 && sampling != 24000 &&
-                sampling != 32000 && sampling != 48000) {
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(lsession), SWITCH_LOG_WARNING,
-                                  "Invalid sampling rate %d, defaulting to 8000\n", sampling);
-                sampling = 8000;
-            }
-        }
-
-        status = start_capture(
-            lsession,
-            flags,
-            wsUri,
-            sampling,
-            argc > 5 ? argv[5] : NULL
-        );
+        status = external_audio_inject_start(argv[0], argv[2]);
     }
+    /* ── STOP ── */
+    else if (!strcasecmp(argv[1], "stop")) {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+                          "[mod_audio_stream] API: stop uuid=%s\n", argv[0]);
 
-    switch_core_session_rwunlock(lsession);
+        status = external_audio_inject_stop(argv[0]);
+    }
+    /* ── STATUS ── */
+    else if (!strcasecmp(argv[1], "status")) {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+                          "[mod_audio_stream] API: status uuid=%s\n", argv[0]);
+
+        status = external_audio_inject_status(argv[0], stream);
+        /* status writes its own output, skip +OK/-ERR */
+        switch_safe_free(mycmd);
+        return SWITCH_STATUS_SUCCESS;
+    }
+    else {
+        stream->write_function(stream, "-USAGE: %s\n", EXT_INJECT_API_SYNTAX);
+        goto done;
+    }
 
 done:
     if (status == SWITCH_STATUS_SUCCESS) {
@@ -363,6 +117,10 @@ done:
     return SWITCH_STATUS_SUCCESS;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*  Module load                                                              */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
 SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load)
 {
     switch_api_interface_t *api_interface;
@@ -370,29 +128,54 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load)
     *module_interface =
         switch_loadable_module_create_module_interface(pool, modname);
 
+    /* Register custom events */
     switch_event_reserve_subclass(EVENT_JSON);
     switch_event_reserve_subclass(EVENT_CONNECT);
     switch_event_reserve_subclass(EVENT_ERROR);
     switch_event_reserve_subclass(EVENT_DISCONNECT);
     switch_event_reserve_subclass(EVENT_PLAY);
 
+    /* Register the API command */
     SWITCH_ADD_API(
         api_interface,
-        "uuid_audio_stream",
-        "audio stream",
-        stream_function,
-        STREAM_API_SYNTAX
+        "uuid_ext_audio_inject",
+        "External WebSocket audio injector — "
+        "connects to a WS server, receives audio_chunk JSON with base64 PCM, "
+        "injects decoded audio into the caller's ear. "
+        "Auto-reconnects every 10 seconds. Logs status every 30 seconds.",
+        ext_audio_inject_function,
+        EXT_INJECT_API_SYNTAX
     );
+
+    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE,
+        "══════════════════════════════════════════════════════\n"
+        "  mod_audio_stream LOADED\n"
+        "  API: uuid_ext_audio_inject <uuid> start|stop|status\n"
+        "══════════════════════════════════════════════════════\n");
 
     return SWITCH_STATUS_SUCCESS;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*  Module shutdown                                                          */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_audio_stream_shutdown)
 {
+    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE,
+                      "[mod_audio_stream] SHUTTING DOWN — stopping all injectors...\n");
+
+    /* Stop all running external audio injectors */
+    external_audio_inject_shutdown();
+
     switch_event_free_subclass(EVENT_JSON);
     switch_event_free_subclass(EVENT_CONNECT);
     switch_event_free_subclass(EVENT_DISCONNECT);
     switch_event_free_subclass(EVENT_ERROR);
     switch_event_free_subclass(EVENT_PLAY);
+
+    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE,
+                      "[mod_audio_stream] SHUTDOWN COMPLETE ✓\n");
+
     return SWITCH_STATUS_SUCCESS;
 }

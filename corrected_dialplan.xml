@@ -1,0 +1,60 @@
+<!--
+  ═══════════════════════════════════════════════════════════════════════════
+  FreeSWITCH Dialplan: External Audio Inject via WebSocket
+
+  HOW IT WORKS:
+    1. Caller dials extension 1234
+    2. FreeSWITCH answers the call
+    3. uuid_ext_audio_inject connects to your WebSocket server
+    4. WebSocket server sends JSON with { callId, audioData, sampleRate }
+    5. Caller HEARS the injected audio in their phone
+    6. Call stays up until hangup (park + hold)
+
+  SETUP:
+    - Your WS server must be running at ws://localhost:8777
+    - Start it:  cd server && node index.js
+    - Inject audio: curl "http://localhost:8766/send?callId=<UUID>"
+
+  INSTALL:
+    Copy this into your FreeSWITCH dialplan directory, e.g.:
+    /usr/local/freeswitch/conf/dialplan/default/90_audio_inject.xml
+  ═══════════════════════════════════════════════════════════════════════════
+-->
+
+<include>
+  <extension name="audio_inject_demo">
+    <!-- Match when someone dials 1234 -->
+    <condition field="destination_number" expression="^1234$">
+
+      <!-- Answer the call -->
+      <action application="answer"/>
+
+      <!-- Small delay to ensure media is established -->
+      <action application="sleep" data="500"/>
+
+      <!--
+        Start the external audio injector.
+        This connects to your WebSocket server and waits for audio_chunk
+        messages. The ${uuid} variable is the call's unique ID.
+
+        Change ws://localhost:8777 to your actual WS server address.
+      -->
+      <action application="set" data="ext_inject_ws_uri=ws://localhost:8777"/>
+      <action application="export" data="nolocal:execute_on_answer=uuid_ext_audio_inject ${uuid} start ${ext_inject_ws_uri}"/>
+
+      <!--
+        Also start it immediately via inline API (more reliable):
+      -->
+      <action application="set" data="api_result=${uuid_ext_audio_inject(${uuid} start ws://localhost:8777)}"/>
+      <action application="log" data="INFO Audio inject started: ${api_result}"/>
+
+      <!--
+        Play a comfort tone/silence to keep the call alive.
+        The caller will hear the injected WebSocket audio
+        mixed/replaced into this.
+      -->
+      <action application="playback" data="silence_stream://-1"/>
+
+    </condition>
+  </extension>
+</include>
