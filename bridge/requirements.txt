@@ -1,0 +1,14 @@
+# TTS-Engine Bridge Dependencies
+#
+# Server (Colab):    pip install websockets nest_asyncio openai-whisper
+# Client (Laptop):   pip install websockets pyaudio
+
+# --- Shared ---
+websockets>=12.0
+
+# --- Server only (install on Colab) ---
+nest_asyncio>=1.6.0
+openai-whisper>=20231117
+
+# --- Client only (install on laptop) ---
+pyaudio>=0.2.14
