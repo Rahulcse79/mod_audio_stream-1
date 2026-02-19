@@ -33,7 +33,7 @@ end
 # Unset irrelevant variables.
 deactivate nondestructive
 
-set -gx VIRTUAL_ENV "/Users/rahulsingh/Documents/GitHub/TTS-Engine/bridge/.venv"
+set -gx VIRTUAL_ENV "/Users/rahulsingh/Documents/GitHub/mod_audio_stream/bridge/.venv"
 
 set -gx _OLD_VIRTUAL_PATH $PATH
 set -gx PATH "$VIRTUAL_ENV/bin" $PATH

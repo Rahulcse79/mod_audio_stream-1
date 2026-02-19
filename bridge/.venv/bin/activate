@@ -35,7 +35,7 @@ deactivate () {
 # unset irrelevant variables
 deactivate nondestructive
 
-VIRTUAL_ENV="/Users/rahulsingh/Documents/GitHub/TTS-Engine/bridge/.venv"
+VIRTUAL_ENV="/Users/rahulsingh/Documents/GitHub/mod_audio_stream/bridge/.venv"
 export VIRTUAL_ENV
 
 _OLD_VIRTUAL_PATH="$PATH"
