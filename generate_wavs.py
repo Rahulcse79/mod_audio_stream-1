@@ -1,4 +1,3 @@
-
 import os
 import csv
 import requests
@@ -9,8 +8,8 @@ import requests
 ELEVEN_API_KEY = "sk_ca9d324b19769026c0ba589436422d51d065b9c8ccfd5521"
 VOICE_ID = "SIHMomTAOjOPeaiJ43D0"
 
-METADATA_FILE = "/content/piper/dataset/metadata.csv"
-OUTPUT_DIR = "/content/piper/dataset/wavs"
+METADATA_FILE = "/content/dataset/metadata.csv"
+OUTPUT_DIR = "/content/dataset/wavs"
 
 MODEL_ID = "eleven_multilingual_v2"
 # ==========================
