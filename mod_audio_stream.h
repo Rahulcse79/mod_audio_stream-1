@@ -76,6 +76,15 @@ struct ai_engine_config {
     int    debug_ai;
     char   transfer_targets[MAX_TRANSFER_TARGETS][MAX_SESSION_ID];
     int    transfer_target_count;
+
+    /* PostgreSQL telemetry */
+    int    db_enabled;
+    char   db_host[MAX_SESSION_ID];
+    char   db_port[16];
+    char   db_user[MAX_SESSION_ID];
+    char   db_password[MAX_SESSION_ID];
+    char   db_name[MAX_SESSION_ID];
+    char   recording_path[MAX_METADATA_LEN];
 };
 
 typedef struct ai_engine_config ai_engine_config_t;
@@ -127,6 +136,10 @@ struct private_data {
     volatile switch_atomic_t action_pending;
     char pending_action[MAX_SESSION_ID];
     char pending_action_data[MAX_METADATA_LEN];
+
+    /* Telemetry: accumulated conversation text (user + AI lines) */
+    void *conversation_text;   /* pointer to a C++ std::string, cast in glue */
+    volatile switch_atomic_t db_saved;
 };
 
 typedef struct private_data private_t;

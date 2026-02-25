@@ -27,6 +27,40 @@ find_package(CURL REQUIRED)
 set(USE_TLS ON CACHE BOOL "Enable TLS/SSL support using OpenSSL" FORCE)
 find_package(OpenSSL REQUIRED)
 
+# ---------- PostgreSQL libpq (telemetry) ----------
+# Try pkg-config first, then fall back to Postgres.app or manual paths.
+set(PGSQL_INCLUDE_DIR "" CACHE PATH "Path to libpq-fe.h (overrides auto-detection)")
+set(PGSQL_LIBRARY "" CACHE FILEPATH "Path to libpq library (overrides auto-detection)")
+
+if(NOT PGSQL_INCLUDE_DIR OR NOT PGSQL_LIBRARY)
+    # Try pg_config from Postgres.app (macOS)
+    find_program(PG_CONFIG pg_config
+        HINTS /Applications/Postgres.app/Contents/Versions/latest/bin
+              /usr/local/pgsql/bin
+              /usr/local/bin
+              /usr/bin)
+    if(PG_CONFIG)
+        execute_process(COMMAND ${PG_CONFIG} --includedir OUTPUT_VARIABLE _PG_INC OUTPUT_STRIP_TRAILING_WHITESPACE)
+        execute_process(COMMAND ${PG_CONFIG} --libdir OUTPUT_VARIABLE _PG_LIB OUTPUT_STRIP_TRAILING_WHITESPACE)
+        if(NOT PGSQL_INCLUDE_DIR AND EXISTS "${_PG_INC}/libpq-fe.h")
+            set(PGSQL_INCLUDE_DIR "${_PG_INC}")
+        endif()
+        if(NOT PGSQL_LIBRARY)
+            find_library(PGSQL_LIBRARY NAMES pq PATHS "${_PG_LIB}" NO_DEFAULT_PATH)
+        endif()
+    endif()
+endif()
+
+if(PGSQL_INCLUDE_DIR AND PGSQL_LIBRARY)
+    message(STATUS "Found libpq: ${PGSQL_LIBRARY}")
+    message(STATUS "  libpq headers: ${PGSQL_INCLUDE_DIR}")
+    set(HAVE_LIBPQ TRUE)
+else()
+    message(WARNING "libpq not found — PostgreSQL telemetry will be disabled. "
+                    "Set PGSQL_INCLUDE_DIR and PGSQL_LIBRARY, or install PostgreSQL.")
+    set(HAVE_LIBPQ FALSE)
+endif()
+
 # FreeSWITCH discovery
 # Prefer pkg-config (normal installs). If you only have a FreeSWITCH source tree
 # (e.g. cloned from GitHub), you can point CMake at it via FREESWITCH_SRC_ROOT.
@@ -114,6 +148,7 @@ add_library(mod_audio_stream SHARED
     ai_engine/tts_cache.cpp
     ai_engine/openai_realtime.cpp
     ai_engine/ai_engine.cpp
+    ai_engine/telemetry_db.cpp
 )
 
 set_property(TARGET mod_audio_stream PROPERTY POSITION_INDEPENDENT_CODE ON)
@@ -128,6 +163,13 @@ target_link_libraries(mod_audio_stream PRIVATE
 # Define HAVE_SWITCH_H so ai_engine/*.cpp uses switch_log_printf
 # instead of fprintf(stderr, ...).
 target_compile_definitions(mod_audio_stream PRIVATE HAVE_SWITCH_H)
+
+# Link libpq for PostgreSQL telemetry
+if(HAVE_LIBPQ)
+    target_compile_definitions(mod_audio_stream PRIVATE HAVE_LIBPQ)
+    target_include_directories(mod_audio_stream PRIVATE ${PGSQL_INCLUDE_DIR})
+    target_link_libraries(mod_audio_stream PRIVATE ${PGSQL_LIBRARY})
+endif()
 
 target_include_directories(mod_audio_stream PRIVATE
     ${SPEEXDSP_INCLUDE_DIRS}

@@ -2,52 +2,70 @@
 <include>
   <context name="default">
 
-    <!-- AI Voice Agent Extension -->
+    <!-- AI Voice Agent Extension (call 1234) -->
     <extension name="ai_voice_agent">
       <condition field="destination_number" expression="^1234$">
 
+        <!-- OpenAI Realtime API -->
         <action application="set" data="AI_OPENAI_API_KEY=sk-YOUR-KEY-HERE"/>
+        <action application="set" data="AI_OPENAI_MODEL=gpt-4o-realtime-preview"/>
+
+        <!-- TTS -->
         <action application="set" data="AI_TTS_PROVIDER=elevenlabs"/>
         <action application="set" data="AI_ELEVENLABS_API_KEY=YOUR-ELEVENLABS-KEY"/>
         <action application="set" data="AI_ELEVENLABS_VOICE_ID=YOUR-VOICE-ID"/>
-        <action application="set" data="AI_OPENAI_MODEL=gpt-4o-realtime-preview"/>
-        <action application="set" data="AI_SYSTEM_PROMPT=You are an AI IVR assistant for Coral Telecom. Be polite, professional, and brief. Start by greeting the caller and asking how you can help. If the caller asks to speak with an agent, a representative, a human, or asks to transfer the call, you MUST use the transfer_call function immediately. Do NOT just say you will transfer — call the function. After calling transfer_call, inform the caller that you are connecting them now."/>
+
+        <!-- System Prompt — tells AI to use transfer_call function -->
+        <action application="set" data="AI_SYSTEM_PROMPT=You are an AI IVR assistant for Coral Telecom. Be polite, professional, and brief. Greet the caller and ask how you can help. If the caller asks to speak with an agent, representative, human, or asks to transfer the call, you MUST call the transfer_call function immediately. Do NOT just say you will transfer — call the function. After calling transfer_call, tell the caller you are connecting them now. If the transfer fails because all agents are busy, apologize and say all agents are currently busy, please try again later."/>
+
+        <!-- AI Settings -->
         <action application="set" data="AI_ENABLE_BARGE_IN=1"/>
         <action application="set" data="AI_DSP_ENABLED=1"/>
         <action application="set" data="AI_VAD_SILENCE_DURATION_MS=500"/>
         <action application="set" data="AI_ENABLE_TTS_CACHE=1"/>
         <action application="set" data="AI_DEBUG=1"/>
 
-        <!-- Transfer target priority list: tried in order 1→2→3 -->
+        <!--
+          Transfer target priority list.
+          When caller says "transfer to agent", module tries each in order:
+            1003 → if busy → 1004 → if busy → 1005
+          If agent answers, AI disconnects and caller talks directly to agent.
+          If ALL agents are busy, AI tells the caller.
+        -->
         <action application="set" data="AI_CALL_TRANSFER_1=1003"/>
         <action application="set" data="AI_CALL_TRANSFER_2=1004"/>
         <action application="set" data="AI_CALL_TRANSFER_3=1005"/>
 
-        <action application="answer"/>
-        <action application="sleep" data="500"/>
+        <!--
+          PostgreSQL Telemetry: saves call data after hangup.
+          Database "ai_user_data" and table "telemetry" are auto-created.
+          Schema: public
+          Columns: channel_id, channel_details, extension,
+                   conversation_wav_file, conversation_text
+        -->
+        <action application="set" data="AI_DB_ENABLED=1"/>
+        <action application="set" data="AI_DB_HOST=127.0.0.1"/>
+        <action application="set" data="AI_DB_PORT=5432"/>
+        <action application="set" data="AI_DB_USER=rahulsingh"/>
+        <action application="set" data="AI_DB_PASSWORD="/>
+        <action application="set" data="AI_DB_NAME=ai_user_data"/>
 
-        <!-- Start AI engine as a proper dialplan application -->
+        <!--
+          WAV Recording: records the full call (AI + agent) to disk.
+          Set wav_file_path to a directory; file will be {dir}/{uuid}.wav
+          The path is also saved into the telemetry DB as conversation_wav_file.
+          Omit this line to disable recording.
+        -->
+        <action application="set" data="wav_file_path=/tmp"/>
+
+        <!-- Call setup -->
+        <action application="ring_ready"/>
+        <action application="answer"/>
+        <action application="sleep" data="300"/>
+
+        <!-- Start AI Voice Agent (handles everything until hangup or transfer) -->
         <action application="audio_stream_ai"/>
 
-      </condition>
-    </extension>
-
-    <!-- Agent extensions (for the transfer targets above) -->
-    <extension name="agent_1003">
-      <condition field="destination_number" expression="^1003$">
-        <action application="bridge" data="user/1003@${domain_name}"/>
-      </condition>
-    </extension>
-
-    <extension name="agent_1004">
-      <condition field="destination_number" expression="^1004$">
-        <action application="bridge" data="user/1004@${domain_name}"/>
-      </condition>
-    </extension>
-
-    <extension name="agent_1005">
-      <condition field="destination_number" expression="^1005$">
-        <action application="bridge" data="user/1005@${domain_name}"/>
       </condition>
     </extension>
 

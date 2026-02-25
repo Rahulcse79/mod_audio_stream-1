@@ -1,6 +1,7 @@
 #include "mod_audio_stream.h"
 #include "audio_streamer_glue.h"
 #include "ai_engine/ai_engine.h"
+#include "ai_engine/telemetry_db.h"
 #include <memory>
 #include <cstring>
 #include <cstdlib>
@@ -50,6 +51,70 @@ static void ai_event_handler(switch_core_session_t* session,
         fs_event = EVENT_AI_ACTION;
     }
 
+    /* Accumulate transcript text for telemetry DB */
+    if (event_name == "user_transcript" || event_name == "response_done") {
+        switch_channel_t* ch = switch_core_session_get_channel(session);
+        switch_media_bug_t* bug = (switch_media_bug_t*)switch_channel_get_private(ch, MY_BUG_NAME_AI);
+        if (bug) {
+            private_t* pvt = (private_t*)switch_core_media_bug_get_user_data(bug);
+            if (pvt && pvt->conversation_text) {
+                auto* text = static_cast<std::string*>(pvt->conversation_text);
+
+                /* Extract clean text from JSON payload */
+                std::string clean_text;
+                if (event_name == "user_transcript") {
+                    /* JSON: {"transcript":"Hello"} — extract the transcript value */
+                    const char* key = "\"transcript\":\"";
+                    size_t pos = json.find(key);
+                    if (pos != std::string::npos) {
+                        pos += strlen(key);
+                        size_t end = json.find("\"", pos);
+                        /* Handle escaped quotes in transcript */
+                        while (end != std::string::npos && end > 0 && json[end - 1] == '\\') {
+                            end = json.find("\"", end + 1);
+                        }
+                        if (end != std::string::npos) {
+                            clean_text = json.substr(pos, end - pos);
+                        }
+                    }
+                    if (clean_text.empty()) clean_text = json; /* fallback */
+                } else {
+                    /* response_done JSON: {"length":69,"text":"actual AI response"} */
+                    const char* key = "\"text\":\"";
+                    size_t pos = json.find(key);
+                    if (pos != std::string::npos) {
+                        pos += strlen(key);
+                        /* Find the closing quote, skipping escaped quotes */
+                        size_t end = pos;
+                        while (end < json.size()) {
+                            end = json.find("\"", end);
+                            if (end == std::string::npos) break;
+                            /* Count preceding backslashes */
+                            size_t bs = 0;
+                            size_t bp = end;
+                            while (bp > pos && json[bp - 1] == '\\') { bs++; bp--; }
+                            if (bs % 2 == 0) break; /* even backslashes = real quote */
+                            end++;
+                        }
+                        if (end != std::string::npos && end > pos) {
+                            clean_text = json.substr(pos, end - pos);
+                        }
+                    }
+                    if (clean_text.empty()) return; /* skip if no actual text */
+                }
+
+                switch_mutex_lock(pvt->mutex);
+                if (!text->empty()) *text += "\n";
+                if (event_name == "user_transcript") {
+                    *text += "[User]: " + clean_text;
+                } else {
+                    *text += "[AI]: " + clean_text;
+                }
+                switch_mutex_unlock(pvt->mutex);
+            }
+        }
+    }
+
     responseHandler(session, fs_event, json.c_str());
 }
 
@@ -88,66 +153,22 @@ static void handle_transfer_action(switch_core_session_t* session,
         return;
     }
 
-    /* Try each agent in order, check if they are registered/available */
-    const char* context = switch_channel_get_variable(channel, "context");
-    if (!context || !*context) context = "default";
-    const char* dialplan = switch_channel_get_variable(channel, "dialplan");
-    if (!dialplan || !*dialplan) dialplan = "XML";
-
-    for (int i = 0; i < target_count; i++) {
-        const char* target = tech_pvt->ai_cfg.transfer_targets[i];
-        if (!target || !*target) continue;
-
-        /* Check if the extension/user is registered using show registrations or originate check */
-        char* sql = switch_mprintf("select count(*) from registrations where reg_user='%q'", target);
-        char count_str[16] = "0";
-        /* Try a sofia status check via API */
-        char api_cmd[512];
-        switch_stream_handle_t api_stream = { 0 };
-        SWITCH_STANDARD_STREAM(api_stream);
-        snprintf(api_cmd, sizeof(api_cmd), "sofia_contact */%s@${domain_name}", target);
-
-        /* Simple approach: try originate to check availability */
-        /* For now, attempt the transfer - FreeSWITCH will handle busy/unavailable */
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                          "(%s) Attempting transfer to agent: %s (target %d/%d)\n",
-                          uuid, target, i + 1, target_count);
-
-        switch_safe_free(sql);
-        switch_safe_free(api_stream.data);
-
-        /* Set channel variable so the dialplan/app knows which agent */
-        switch_channel_set_variable(channel, "ai_transfer_target", target);
-        switch_channel_set_variable(channel, "ai_transfer_reason", arguments.c_str());
-
-        /* Store the transfer info as a pending action.
-         * The actual transfer must happen on the FreeSWITCH session thread,
-         * not from a callback thread. We signal it via the action_pending atomic. */
-        switch_mutex_lock(tech_pvt->mutex);
-        snprintf(tech_pvt->pending_action, MAX_SESSION_ID, "transfer");
-        snprintf(tech_pvt->pending_action_data, MAX_METADATA_LEN, "%s", target);
-        switch_atomic_set(&tech_pvt->action_pending, SWITCH_TRUE);
-        switch_mutex_unlock(tech_pvt->mutex);
-
-        /* Send result to OpenAI so it can tell the caller */
-        if (engine) {
-            char result[512];
-            snprintf(result, sizeof(result),
-                     "{\"success\":true,\"message\":\"Transferring call to agent %s\"}",
-                     target);
-            engine->send_action_result(call_id, result);
-        }
-
-        return;
-    }
-
-    /* If we got here, no targets available */
-    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-                      "(%s) All transfer targets exhausted\n", uuid);
+    /* Tell OpenAI that transfer is starting — it will say "connecting you now" */
     if (engine) {
         engine->send_action_result(call_id,
-            "{\"success\":false,\"error\":\"All agents are currently busy. Please try again later.\"}");
+            "{\"success\":true,\"message\":\"Initiating transfer to agent\"}");
     }
+
+    /* Set channel variables for the app function to pick up */
+    switch_channel_set_variable(channel, "ai_transfer_reason", arguments.c_str());
+
+    /* Signal the app function to perform the bridge.
+     * We pass "bridge" as the action — the app function will iterate all targets. */
+    switch_mutex_lock(tech_pvt->mutex);
+    snprintf(tech_pvt->pending_action, MAX_SESSION_ID, "bridge");
+    tech_pvt->pending_action_data[0] = '\0';  /* app function uses transfer_targets[] directly */
+    switch_atomic_set(&tech_pvt->action_pending, SWITCH_TRUE);
+    switch_mutex_unlock(tech_pvt->mutex);
 }
 
 extern "C" {
@@ -245,6 +266,63 @@ switch_status_t ai_engine_session_init(switch_core_session_t *session,
                               "(%s) Transfer target %d: %s\n", uuid, i + 1, target);
         } else {
             break;  /* Stop at first gap */
+        }
+    }
+
+    /* Read PostgreSQL telemetry config */
+    ai_cfg.db_enabled = get_channel_var_int(session, "AI_DB_ENABLED", 0);
+    safe_strncpy(ai_cfg.db_host,
+                 get_channel_var(session, "AI_DB_HOST", "127.0.0.1"),
+                 MAX_SESSION_ID);
+    safe_strncpy(ai_cfg.db_port,
+                 get_channel_var(session, "AI_DB_PORT", "5432"),
+                 sizeof(ai_cfg.db_port));
+    safe_strncpy(ai_cfg.db_user,
+                 get_channel_var(session, "AI_DB_USER", "rahulsingh"),
+                 MAX_SESSION_ID);
+    safe_strncpy(ai_cfg.db_password,
+                 get_channel_var(session, "AI_DB_PASSWORD", ""),
+                 MAX_SESSION_ID);
+    safe_strncpy(ai_cfg.db_name,
+                 get_channel_var(session, "AI_DB_NAME", "ai_user_data"),
+                 MAX_SESSION_ID);
+    /* Build recording file path: {wav_file_path}/{uuid}.wav
+     * If wav_file_path channel var is set, use it as the directory.
+     * Otherwise recording_path stays empty and no recording is done. */
+    {
+        const char *wav_dir = get_channel_var(session, "wav_file_path", "");
+        if (wav_dir[0]) {
+            const char *uuid = switch_core_session_get_uuid(session);
+            char rec_path[MAX_METADATA_LEN];
+            snprintf(rec_path, sizeof(rec_path), "%s/%s.wav", wav_dir, uuid);
+            safe_strncpy(ai_cfg.recording_path, rec_path, MAX_METADATA_LEN);
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                              "(%s) WAV recording path: %s\n", uuid, ai_cfg.recording_path);
+        } else {
+            ai_cfg.recording_path[0] = '\0';
+        }
+    }
+
+    /* Allocate the conversation text buffer */
+    tech_pvt->conversation_text = new std::string();
+    switch_atomic_set(&tech_pvt->db_saved, SWITCH_FALSE);
+
+    /* Initialize telemetry schema (auto-create DB + table if missing) */
+    if (ai_cfg.db_enabled) {
+        telemetry::DBConfig dbcfg;
+        dbcfg.host     = ai_cfg.db_host;
+        dbcfg.port     = ai_cfg.db_port;
+        dbcfg.user     = ai_cfg.db_user;
+        dbcfg.password = ai_cfg.db_password;
+        dbcfg.dbname   = ai_cfg.db_name;
+        if (telemetry::ensure_schema(dbcfg)) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                              "(%s) Telemetry DB ready: %s@%s:%s/%s\n",
+                              uuid, ai_cfg.db_user, ai_cfg.db_host,
+                              ai_cfg.db_port, ai_cfg.db_name);
+        } else {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                              "(%s) Telemetry DB init failed — call data will not be saved\n", uuid);
         }
     }
 
@@ -486,6 +564,72 @@ switch_status_t ai_engine_session_cleanup(switch_core_session_t *session,
     if (tech_pvt->resampler) {
         speex_resampler_destroy(tech_pvt->resampler);
         tech_pvt->resampler = nullptr;
+    }
+
+    /* Save telemetry to PostgreSQL if enabled and not already saved */
+    if (tech_pvt->ai_cfg.db_enabled && !switch_atomic_read(&tech_pvt->db_saved)) {
+        switch_atomic_set(&tech_pvt->db_saved, SWITCH_TRUE);
+
+        telemetry::DBConfig dbcfg;
+        dbcfg.host     = tech_pvt->ai_cfg.db_host;
+        dbcfg.port     = tech_pvt->ai_cfg.db_port;
+        dbcfg.user     = tech_pvt->ai_cfg.db_user;
+        dbcfg.password = tech_pvt->ai_cfg.db_password;
+        dbcfg.dbname   = tech_pvt->ai_cfg.db_name;
+
+        telemetry::CallRecord rec;
+        rec.channel_id = tech_pvt->sessionId;
+
+        /* Build channel_details from channel variables */
+        switch_channel_t* ch = switch_core_session_get_channel(session);
+        if (ch) {
+            std::string details;
+            const char* vars[] = {
+                "uuid", "direction", "created", "created_epoch", "channel_name",
+                "state", "caller_id_name", "caller_id_number", "network_addr",
+                "destination_number", "current_application", "current_application_data",
+                "dialplan", "context", "read_codec", "read_rate", "write_codec",
+                "write_rate", "secure", "hostname", "presence_id",
+                "accountcode", "callstate", "callee_id_name", "callee_id_number",
+                "call_uuid", "initial_caller_id_name", "initial_caller_id_number",
+                "initial_network_addr", "initial_dest", "initial_dialplan", "initial_context",
+                NULL
+            };
+            for (int i = 0; vars[i]; i++) {
+                const char* val = switch_channel_get_variable(ch, vars[i]);
+                if (i > 0) details += ",";
+                details += (val ? val : "");
+            }
+            rec.channel_details = details;
+
+            const char* caller = switch_channel_get_variable(ch, "caller_id_number");
+            rec.extension = caller ? caller : "";
+        }
+
+        /* Recording WAV path — only set if recording was actually configured */
+        if (tech_pvt->ai_cfg.recording_path[0]) {
+            rec.conversation_wav_file = tech_pvt->ai_cfg.recording_path;
+        } else {
+            rec.conversation_wav_file = "";
+        }
+
+        /* Conversation text */
+        if (tech_pvt->conversation_text) {
+            rec.conversation_text = *static_cast<std::string*>(tech_pvt->conversation_text);
+        }
+
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                          "(%s) Saving telemetry to DB: ext=%s text_len=%zu\n",
+                          tech_pvt->sessionId, rec.extension.c_str(),
+                          rec.conversation_text.size());
+
+        telemetry::insert_call_record(dbcfg, rec);
+    }
+
+    /* Free conversation text buffer */
+    if (tech_pvt->conversation_text) {
+        delete static_cast<std::string*>(tech_pvt->conversation_text);
+        tech_pvt->conversation_text = nullptr;
     }
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,

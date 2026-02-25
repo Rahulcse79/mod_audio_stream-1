@@ -475,6 +475,7 @@ done:
 SWITCH_STANDARD_APP(audio_stream_ai_app_function)
 {
     switch_channel_t *channel = switch_core_session_get_channel(session);
+    const char *uuid = switch_core_session_get_uuid(session);
 
     if (switch_channel_get_private(channel, MY_BUG_NAME_AI)) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
@@ -488,96 +489,180 @@ SWITCH_STANDARD_APP(audio_stream_ai_app_function)
         return;
     }
 
+    /* Start WAV recording if wav_file_path was configured.
+     * The full path (dir/uuid.wav) was built by ai_engine_session_init
+     * and stored in ai_cfg.recording_path. */
+    char recording_path[MAX_METADATA_LEN] = {0};
+    {
+        switch_media_bug_t *bug = (switch_media_bug_t *)switch_channel_get_private(channel, MY_BUG_NAME_AI);
+        if (bug) {
+            private_t *tp = (private_t *)switch_core_media_bug_get_user_data(bug);
+            if (tp && tp->ai_cfg.recording_path[0]) {
+                strncpy(recording_path, tp->ai_cfg.recording_path, MAX_METADATA_LEN - 1);
+                switch_status_t rec_status = switch_ivr_record_session(session, recording_path, 0, NULL);
+                if (rec_status == SWITCH_STATUS_SUCCESS) {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+                                      "(%s) WAV recording started: %s\n", uuid, recording_path);
+                } else {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                                      "(%s) WAV recording FAILED to start: %s "
+                                      "(is mod_sndfile loaded?)\n", uuid, recording_path);
+                    recording_path[0] = '\0';   /* clear so we don't try to stop later */
+                }
+            }
+        }
+    }
+
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
                       "(%s) audio_stream_ai app: AI engine started, playing silence to hold channel\n",
-                      switch_core_session_get_uuid(session));
+                      uuid);
 
-    /* Main loop: play silence, wake up on transfer actions */
+    /* Main loop: play silence, wake up on actions */
     while (switch_channel_ready(channel)) {
         switch_ivr_play_file(session, NULL, "silence_stream://1000", NULL);
 
-        /* Check if an action (e.g. transfer) is pending */
+        if (!switch_channel_ready(channel)) break;
+
+        /* Check if an action is pending */
         switch_media_bug_t *bug = (switch_media_bug_t *)switch_channel_get_private(channel, MY_BUG_NAME_AI);
         if (!bug) break;
 
         private_t *tech_pvt = (private_t *)switch_core_media_bug_get_user_data(bug);
         if (!tech_pvt) break;
 
-        if (switch_atomic_read(&tech_pvt->action_pending)) {
-            switch_mutex_lock(tech_pvt->mutex);
-            char action[MAX_SESSION_ID];
-            char action_data[MAX_METADATA_LEN];
-            strncpy(action, tech_pvt->pending_action, MAX_SESSION_ID);
-            strncpy(action_data, tech_pvt->pending_action_data, MAX_METADATA_LEN);
-            switch_atomic_set(&tech_pvt->action_pending, SWITCH_FALSE);
-            tech_pvt->pending_action[0] = '\0';
-            tech_pvt->pending_action_data[0] = '\0';
-            switch_mutex_unlock(tech_pvt->mutex);
+        if (!switch_atomic_read(&tech_pvt->action_pending)) continue;
 
-            if (!strcmp(action, "transfer")) {
-                const char *context = switch_channel_get_variable(channel, "context");
-                const char *dialplan = switch_channel_get_variable(channel, "dialplan");
-                if (!context || !*context) context = "default";
-                if (!dialplan || !*dialplan) dialplan = "XML";
+        /* Copy pending action under lock and clear it */
+        switch_mutex_lock(tech_pvt->mutex);
+        char action[MAX_SESSION_ID];
+        char action_data[MAX_METADATA_LEN];
+        strncpy(action, tech_pvt->pending_action, MAX_SESSION_ID);
+        action[MAX_SESSION_ID - 1] = '\0';
+        strncpy(action_data, tech_pvt->pending_action_data, MAX_METADATA_LEN);
+        action_data[MAX_METADATA_LEN - 1] = '\0';
+        switch_atomic_set(&tech_pvt->action_pending, SWITCH_FALSE);
+        tech_pvt->pending_action[0] = '\0';
+        tech_pvt->pending_action_data[0] = '\0';
+
+        /* Save the transfer targets locally before we destroy the bug */
+        int target_count = tech_pvt->ai_cfg.transfer_target_count;
+        char targets[MAX_TRANSFER_TARGETS][MAX_SESSION_ID];
+        for (int i = 0; i < target_count && i < MAX_TRANSFER_TARGETS; i++) {
+            strncpy(targets[i], tech_pvt->ai_cfg.transfer_targets[i], MAX_SESSION_ID);
+            targets[i][MAX_SESSION_ID - 1] = '\0';
+        }
+        switch_mutex_unlock(tech_pvt->mutex);
+
+        if (!strcmp(action, "bridge")) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                              "(%s) Bridge action: stopping AI engine, trying %d agents\n",
+                              uuid, target_count);
+
+            /* 1) Stop the AI engine and remove the media bug.
+             *    This disconnects OpenAI/TTS and frees resources.
+             *    After this, tech_pvt/bug are invalid — do NOT use them. */
+            ai_engine_session_cleanup(session, 0);
+            tech_pvt = NULL;
+            bug = NULL;
+
+            /* 2) Try each agent target in priority order via bridge */
+            int bridged = 0;
+            const char *domain = switch_channel_get_variable(channel, "domain_name");
+            if (!domain || !*domain) domain = "localhost";
+
+            for (int i = 0; i < target_count; i++) {
+                if (!switch_channel_ready(channel)) break;
 
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                  "(%s) Executing transfer to %s (context=%s, dialplan=%s)\n",
-                                  switch_core_session_get_uuid(session),
-                                  action_data, context, dialplan);
+                                  "(%s) Trying agent %d/%d: %s\n",
+                                  uuid, i + 1, target_count, targets[i]);
 
-                /* Attempt transfer to the first target set by the callback.
-                 * If it fails (busy/unavail), try the remaining targets in order. */
-                int transferred = 0;
-                int start_idx = 0;
+                /* Build bridge dial string: user/1003@domain
+                 * call_timeout=30 gives agent 30 seconds to pick up
+                 * The bridge app will ring the agent and connect the caller
+                 * directly when the agent answers. */
+                char dial_string[1024];
+                snprintf(dial_string, sizeof(dial_string),
+                         "{call_timeout=30,hangup_after_bridge=true}user/%s@%s",
+                         targets[i], domain);
 
-                /* Find which target index we're on */
-                for (int i = 0; i < tech_pvt->ai_cfg.transfer_target_count; i++) {
-                    if (!strcmp(tech_pvt->ai_cfg.transfer_targets[i], action_data)) {
-                        start_idx = i;
-                        break;
-                    }
-                }
+                switch_channel_set_variable(channel, "ai_transfer_target", targets[i]);
 
-                for (int i = start_idx; i < tech_pvt->ai_cfg.transfer_target_count; i++) {
-                    const char *target = tech_pvt->ai_cfg.transfer_targets[i];
-                    if (!target || !*target) continue;
+                /* Set ringback so the caller hears ringing while agent phone rings */
+                switch_channel_set_variable(channel, "ringback", "%(2000,4000,440,480)");
 
+                /* Execute the bridge application — this blocks until:
+                 *   - Agent answers → caller & agent are connected → blocks until hangup
+                 *   - Agent busy/no-answer/reject → returns immediately
+                 * On success the caller talked to the agent and one side hung up. */
+                switch_core_session_execute_application(session, "bridge", dial_string);
+
+                /* Check if the bridge succeeded by looking at the channel state.
+                 * After a successful bridge + hangup, the channel may be done. */
+                const char *cause_str = switch_channel_get_variable(channel, "DIALSTATUS");
+                if (!cause_str) cause_str = switch_channel_get_variable(channel, "originate_disposition");
+
+                if (cause_str && !strcasecmp(cause_str, "SUCCESS")) {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                      "(%s) Trying transfer target %d/%d: %s\n",
-                                      switch_core_session_get_uuid(session),
-                                      i + 1, tech_pvt->ai_cfg.transfer_target_count, target);
-
-                    /* Attempt the transfer */
-                    switch_status_t xfer_status = switch_ivr_session_transfer(
-                        session, target, dialplan, context);
-
-                    if (xfer_status == SWITCH_STATUS_SUCCESS) {
-                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                          "(%s) Transfer to %s successful\n",
-                                          switch_core_session_get_uuid(session), target);
-                        transferred = 1;
-                        break;
-                    }
-
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-                                      "(%s) Transfer to %s failed, trying next...\n",
-                                      switch_core_session_get_uuid(session), target);
-                }
-
-                if (transferred) {
-                    /* Transfer succeeded — channel is moving to new extension, break out */
+                                      "(%s) Bridge to %s completed — call ended\n",
+                                      uuid, targets[i]);
+                    bridged = 1;
                     break;
                 }
 
-                /* All targets exhausted — tell the AI engine so it can inform caller */
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-                                  "(%s) All transfer targets busy/unavailable\n",
-                                  switch_core_session_get_uuid(session));
+                /* If channel is no longer ready, the bridge worked and someone hung up */
+                if (!switch_channel_ready(channel)) {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                      "(%s) Bridge to %s — channel done after bridge\n",
+                                      uuid, targets[i]);
+                    bridged = 1;
+                    break;
+                }
 
-                /* Continue the silence loop — the AI will tell the caller via the
-                 * send_action_result that was already sent from the callback */
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                                  "(%s) Bridge to %s failed (%s), trying next agent...\n",
+                                  uuid, targets[i],
+                                  cause_str ? cause_str : "unknown");
             }
+
+            if (bridged) {
+                /* Agent call is done (agent or caller hung up). End the app. */
+                break;
+            }
+
+            /* All agents busy/unavailable — restart AI and let it tell the caller */
+            if (switch_channel_ready(channel)) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                                  "(%s) All %d agents unavailable — restarting AI engine\n",
+                                  uuid, target_count);
+
+                /* Restart the AI engine so it can talk to the caller again */
+                if (start_capture_ai(session) == SWITCH_STATUS_SUCCESS) {
+                    /* Continue the while loop — AI will resume and tell the caller
+                     * about the failed transfer (via the function_call_output result
+                     * that was already sent to OpenAI before we stopped) */
+                    continue;
+                } else {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                                      "(%s) Failed to restart AI engine after transfer failure\n", uuid);
+                    break;
+                }
+            }
+            break;
         }
+    }
+
+    /* Stop WAV recording first (before AI cleanup so DB gets the right path).
+     * Don't require channel_ready — we want to finalize the file even on hangup. */
+    if (recording_path[0]) {
+        switch_ivr_stop_record_session(session, recording_path);
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+                          "(%s) WAV recording stopped: %s\n", uuid, recording_path);
+    }
+
+    /* Final cleanup if AI is still running */
+    if (switch_channel_get_private(channel, MY_BUG_NAME_AI)) {
+        ai_engine_session_cleanup(session, 0);
     }
 }
 

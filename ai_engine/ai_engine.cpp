@@ -379,7 +379,8 @@ void AIEngine::on_openai_response_done(const std::string& full_text,
     }
 
     if (cb_event_) {
-        cb_event_("response_done", "{\"length\":" + std::to_string(full_text.size()) + "}");
+        cb_event_("response_done", "{\"length\":" + std::to_string(full_text.size()) +
+                  ",\"text\":\"" + json_escape(full_text) + "\"}");
     }
 }
 
