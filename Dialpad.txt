@@ -6,17 +6,22 @@
     <extension name="ai_voice_agent">
       <condition field="destination_number" expression="^1234$">
 
-        <action application="set" data="AI_OPENAI_API_KEY="/>
-        <action application="set" data="AI_TTS_PROVIDER="/>
-        <action application="set" data="AI_ELEVENLABS_API_KEY="/>
-        <action application="set" data="AI_ELEVENLABS_VOICE_ID="/>
-        <action application="set" data="AI_OPENAI_MODEL="/>
-        <action application="set" data="AI_SYSTEM_PROMPT=You are a helpful phone assistant for Acme Corp. Be brief and conversational. Start by greeting the caller and asking how you can help."/>
+        <action application="set" data="AI_OPENAI_API_KEY=sk-YOUR-KEY-HERE"/>
+        <action application="set" data="AI_TTS_PROVIDER=elevenlabs"/>
+        <action application="set" data="AI_ELEVENLABS_API_KEY=YOUR-ELEVENLABS-KEY"/>
+        <action application="set" data="AI_ELEVENLABS_VOICE_ID=YOUR-VOICE-ID"/>
+        <action application="set" data="AI_OPENAI_MODEL=gpt-4o-realtime-preview"/>
+        <action application="set" data="AI_SYSTEM_PROMPT=You are an AI IVR assistant for Coral Telecom. Be polite, professional, and brief. Start by greeting the caller and asking how you can help. If the caller asks to speak with an agent, a representative, a human, or asks to transfer the call, you MUST use the transfer_call function immediately. Do NOT just say you will transfer — call the function. After calling transfer_call, inform the caller that you are connecting them now."/>
         <action application="set" data="AI_ENABLE_BARGE_IN=1"/>
         <action application="set" data="AI_DSP_ENABLED=1"/>
         <action application="set" data="AI_VAD_SILENCE_DURATION_MS=500"/>
         <action application="set" data="AI_ENABLE_TTS_CACHE=1"/>
         <action application="set" data="AI_DEBUG=1"/>
+
+        <!-- Transfer target priority list: tried in order 1→2→3 -->
+        <action application="set" data="AI_CALL_TRANSFER_1=1003"/>
+        <action application="set" data="AI_CALL_TRANSFER_2=1004"/>
+        <action application="set" data="AI_CALL_TRANSFER_3=1005"/>
 
         <action application="answer"/>
         <action application="sleep" data="500"/>
@@ -24,6 +29,25 @@
         <!-- Start AI engine as a proper dialplan application -->
         <action application="audio_stream_ai"/>
 
+      </condition>
+    </extension>
+
+    <!-- Agent extensions (for the transfer targets above) -->
+    <extension name="agent_1003">
+      <condition field="destination_number" expression="^1003$">
+        <action application="bridge" data="user/1003@${domain_name}"/>
+      </condition>
+    </extension>
+
+    <extension name="agent_1004">
+      <condition field="destination_number" expression="^1004$">
+        <action application="bridge" data="user/1004@${domain_name}"/>
+      </condition>
+    </extension>
+
+    <extension name="agent_1005">
+      <condition field="destination_number" expression="^1005$">
+        <action application="bridge" data="user/1005@${domain_name}"/>
       </condition>
     </extension>
 

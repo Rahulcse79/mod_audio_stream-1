@@ -492,7 +492,93 @@ SWITCH_STANDARD_APP(audio_stream_ai_app_function)
                       "(%s) audio_stream_ai app: AI engine started, playing silence to hold channel\n",
                       switch_core_session_get_uuid(session));
 
-    switch_ivr_play_file(session, NULL, "silence_stream://-1", NULL);
+    /* Main loop: play silence, wake up on transfer actions */
+    while (switch_channel_ready(channel)) {
+        switch_ivr_play_file(session, NULL, "silence_stream://1000", NULL);
+
+        /* Check if an action (e.g. transfer) is pending */
+        switch_media_bug_t *bug = (switch_media_bug_t *)switch_channel_get_private(channel, MY_BUG_NAME_AI);
+        if (!bug) break;
+
+        private_t *tech_pvt = (private_t *)switch_core_media_bug_get_user_data(bug);
+        if (!tech_pvt) break;
+
+        if (switch_atomic_read(&tech_pvt->action_pending)) {
+            switch_mutex_lock(tech_pvt->mutex);
+            char action[MAX_SESSION_ID];
+            char action_data[MAX_METADATA_LEN];
+            strncpy(action, tech_pvt->pending_action, MAX_SESSION_ID);
+            strncpy(action_data, tech_pvt->pending_action_data, MAX_METADATA_LEN);
+            switch_atomic_set(&tech_pvt->action_pending, SWITCH_FALSE);
+            tech_pvt->pending_action[0] = '\0';
+            tech_pvt->pending_action_data[0] = '\0';
+            switch_mutex_unlock(tech_pvt->mutex);
+
+            if (!strcmp(action, "transfer")) {
+                const char *context = switch_channel_get_variable(channel, "context");
+                const char *dialplan = switch_channel_get_variable(channel, "dialplan");
+                if (!context || !*context) context = "default";
+                if (!dialplan || !*dialplan) dialplan = "XML";
+
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                  "(%s) Executing transfer to %s (context=%s, dialplan=%s)\n",
+                                  switch_core_session_get_uuid(session),
+                                  action_data, context, dialplan);
+
+                /* Attempt transfer to the first target set by the callback.
+                 * If it fails (busy/unavail), try the remaining targets in order. */
+                int transferred = 0;
+                int start_idx = 0;
+
+                /* Find which target index we're on */
+                for (int i = 0; i < tech_pvt->ai_cfg.transfer_target_count; i++) {
+                    if (!strcmp(tech_pvt->ai_cfg.transfer_targets[i], action_data)) {
+                        start_idx = i;
+                        break;
+                    }
+                }
+
+                for (int i = start_idx; i < tech_pvt->ai_cfg.transfer_target_count; i++) {
+                    const char *target = tech_pvt->ai_cfg.transfer_targets[i];
+                    if (!target || !*target) continue;
+
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                      "(%s) Trying transfer target %d/%d: %s\n",
+                                      switch_core_session_get_uuid(session),
+                                      i + 1, tech_pvt->ai_cfg.transfer_target_count, target);
+
+                    /* Attempt the transfer */
+                    switch_status_t xfer_status = switch_ivr_session_transfer(
+                        session, target, dialplan, context);
+
+                    if (xfer_status == SWITCH_STATUS_SUCCESS) {
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                          "(%s) Transfer to %s successful\n",
+                                          switch_core_session_get_uuid(session), target);
+                        transferred = 1;
+                        break;
+                    }
+
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                                      "(%s) Transfer to %s failed, trying next...\n",
+                                      switch_core_session_get_uuid(session), target);
+                }
+
+                if (transferred) {
+                    /* Transfer succeeded — channel is moving to new extension, break out */
+                    break;
+                }
+
+                /* All targets exhausted — tell the AI engine so it can inform caller */
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                                  "(%s) All transfer targets busy/unavailable\n",
+                                  switch_core_session_get_uuid(session));
+
+                /* Continue the silence loop — the AI will tell the caller via the
+                 * send_action_result that was already sent from the callback */
+            }
+        }
+    }
 }
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load)
@@ -511,6 +597,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load)
     switch_event_reserve_subclass(EVENT_AI_STATE);
     switch_event_reserve_subclass(EVENT_AI_TRANSCRIPT);
     switch_event_reserve_subclass(EVENT_AI_RESPONSE);
+    switch_event_reserve_subclass(EVENT_AI_ACTION);
 
     SWITCH_ADD_API(
         api_interface,
@@ -543,5 +630,6 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_audio_stream_shutdown)
     switch_event_free_subclass(EVENT_AI_STATE);
     switch_event_free_subclass(EVENT_AI_TRANSCRIPT);
     switch_event_free_subclass(EVENT_AI_RESPONSE);
+    switch_event_free_subclass(EVENT_AI_ACTION);
     return SWITCH_STATUS_SUCCESS;
 }

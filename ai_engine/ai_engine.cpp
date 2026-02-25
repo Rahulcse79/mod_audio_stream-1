@@ -133,6 +133,11 @@ bool AIEngine::start(const AIEngineConfig& cfg, switch_core_session_t*) {
         openai_->on_connection_change([this](bool connected) {
             on_openai_connection_change(connected);
         });
+        openai_->on_function_call_done([this](const std::string& call_id,
+                                               const std::string& name,
+                                               const std::string& args) {
+            on_openai_function_call(call_id, name, args);
+        });
 
         openai_->connect(cfg_.openai);
     }
@@ -486,6 +491,11 @@ void AIEngine::on_openai_connection_change(bool connected) {
                                 fresh->on_connection_change([this](bool connected) {
                                     on_openai_connection_change(connected);
                                 });
+                                fresh->on_function_call_done([this](const std::string& call_id,
+                                                                     const std::string& name,
+                                                                     const std::string& args) {
+                                    on_openai_function_call(call_id, name, args);
+                                });
 
                                 openai_ = std::move(fresh);
                                 openai_->connect(cfg_.openai);
@@ -500,6 +510,33 @@ void AIEngine::on_openai_connection_change(bool connected) {
         }
     } else {
         reconnect_attempts_.store(0, std::memory_order_relaxed);
+    }
+}
+
+void AIEngine::on_openai_function_call(const std::string& call_id,
+                                        const std::string& function_name,
+                                        const std::string& arguments) {
+    AI_LOG_INFO("(%s) Function call: name=%s call_id=%s args=%s\n",
+                cfg_.session_uuid.c_str(), function_name.c_str(),
+                call_id.c_str(), arguments.c_str());
+
+    if (cb_action_) {
+        cb_action_(function_name, arguments, call_id);
+    }
+
+    if (cb_event_) {
+        cb_event_("function_call",
+                  "{\"function\":\"" + json_escape(function_name) +
+                  "\",\"arguments\":\"" + json_escape(arguments) +
+                  "\",\"call_id\":\"" + json_escape(call_id) + "\"}");
+    }
+}
+
+void AIEngine::send_action_result(const std::string& call_id,
+                                   const std::string& result_json) {
+    std::lock_guard<std::mutex> lock(openai_mutex_);
+    if (openai_ && openai_->is_connected()) {
+        openai_->send_function_result(call_id, result_json);
     }
 }
 

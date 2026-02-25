@@ -68,6 +68,8 @@ struct AIEngineConfig {
     int  barge_in_min_ms        = 200;    
     bool debug_logging          = false;
     std::string session_uuid;              
+
+    std::vector<std::string> transfer_targets;
 };
 
 enum class AIEngineState {
@@ -83,6 +85,9 @@ enum class AIEngineState {
 using OnStateChange = std::function<void(AIEngineState state, const std::string& detail)>;
 using OnAudioReady = std::function<void(const int16_t* samples, size_t count, int sample_rate)>;
 using OnAIEvent = std::function<void(const std::string& event_name, const std::string& json)>;
+using OnActionRequest = std::function<void(const std::string& action,
+                                            const std::string& data_json,
+                                            const std::string& call_id)>;
 
 struct TTSWorkItem {
     std::string sentence;
@@ -107,6 +112,8 @@ public:
     void set_state_callback(OnStateChange cb)  { cb_state_ = std::move(cb); }
     void set_audio_callback(OnAudioReady cb)   { cb_audio_ = std::move(cb); }
     void set_event_callback(OnAIEvent cb)      { cb_event_ = std::move(cb); }
+    void set_action_callback(OnActionRequest cb) { cb_action_ = std::move(cb); }
+    void send_action_result(const std::string& call_id, const std::string& result_json);
     AIEngineState state() const { return state_.load(std::memory_order_acquire); }
     bool is_speaking() const { return state() == AIEngineState::SPEAKING; }
     bool is_listening() const { return state() == AIEngineState::LISTENING; }
@@ -159,6 +166,9 @@ private:
     void on_openai_input_transcript(const std::string& transcript);
     void on_openai_error(const std::string& error, const std::string& code);
     void on_openai_connection_change(bool connected);
+    void on_openai_function_call(const std::string& call_id,
+                                  const std::string& function_name,
+                                  const std::string& arguments);
     void on_tts_audio(const int16_t* samples, size_t count,
                       bool is_final, const std::string& sentence,
                       int tts_sr);
@@ -172,6 +182,7 @@ private:
     OnStateChange  cb_state_;
     OnAudioReady   cb_audio_;
     OnAIEvent      cb_event_;
+    OnActionRequest cb_action_;
     mutable std::mutex stats_mutex_;
     Stats stats_;
 };

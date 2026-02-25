@@ -47,6 +47,9 @@ using OnInputTranscriptDone = std::function<void(const std::string& transcript)>
 using OnResponseInterrupted = std::function<void()>;
 using OnError = std::function<void(const std::string& error, const std::string& code)>;
 using OnConnectionChange = std::function<void(bool connected)>;
+using OnFunctionCallDone = std::function<void(const std::string& call_id,
+                                               const std::string& function_name,
+                                               const std::string& arguments)>;
 
 class OpenAIRealtimeClient {
 public:
@@ -72,6 +75,8 @@ public:
     void on_response_interrupted(OnResponseInterrupted cb)  { cb_response_interrupted_ = std::move(cb); }
     void on_error(OnError cb)                            { cb_error_ = std::move(cb); }
     void on_connection_change(OnConnectionChange cb)     { cb_connection_ = std::move(cb); }
+    void on_function_call_done(OnFunctionCallDone cb)    { cb_function_call_ = std::move(cb); }
+    void send_function_result(const std::string& call_id, const std::string& result_json);
     bool is_responding() const { return is_responding_.load(std::memory_order_relaxed); }
     bool is_speech_active() const { return is_speech_active_.load(std::memory_order_relaxed); }
 
@@ -96,6 +101,11 @@ private:
     OnResponseInterrupted  cb_response_interrupted_;
     OnError                cb_error_;
     OnConnectionChange     cb_connection_;
+    OnFunctionCallDone     cb_function_call_;
+
+    std::string       current_fc_call_id_;
+    std::string       current_fc_name_;
+    std::string       current_fc_arguments_;
 
     void handle_message(const std::string& message);
     void send_session_update();

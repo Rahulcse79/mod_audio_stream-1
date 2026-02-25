@@ -220,6 +220,33 @@ void OpenAIRealtimeClient::cancel_response() {
     is_responding_.store(false, std::memory_order_release);
 }
 
+void OpenAIRealtimeClient::send_function_result(const std::string& call_id,
+                                                  const std::string& result_json) {
+    if (!is_connected()) return;
+    OAI_LOG_INFO("OpenAI Realtime: sending function result for call_id=%s\n", call_id.c_str());
+
+    std::ostringstream oss;
+    oss << "{\"type\":\"conversation.item.create\",\"item\":{"
+        << "\"type\":\"function_call_output\","
+        << "\"call_id\":\"" << call_id << "\","
+        << "\"output\":\"";
+
+    for (char c : result_json) {
+        switch (c) {
+            case '"':  oss << "\\\""; break;
+            case '\\': oss << "\\\\"; break;
+            case '\n': oss << "\\n";  break;
+            case '\r': oss << "\\r";  break;
+            default:   oss << c;      break;
+        }
+    }
+
+    oss << "\"}}";
+    ws_->sendMessage(oss.str());
+
+    ws_->sendMessage("{\"type\":\"response.create\"}");
+}
+
 void OpenAIRealtimeClient::send_text_message(const std::string& text) {
     if (!is_connected() || text.empty()) return;
     std::ostringstream oss;
@@ -286,8 +313,18 @@ std::string OpenAIRealtimeClient::build_session_config() const {
     }
 
     oss << "\"temperature\":" << cfg_.temperature << ","
-        << "\"max_response_output_tokens\":" << cfg_.max_response_output_tokens
-        << "}}";
+        << "\"max_response_output_tokens\":" << cfg_.max_response_output_tokens;
+
+    if (!cfg_.tools.empty()) {
+        oss << ",\"tools\":[";
+        for (size_t i = 0; i < cfg_.tools.size(); ++i) {
+            if (i > 0) oss << ",";
+            oss << cfg_.tools[i];
+        }
+        oss << "]";
+    }
+
+    oss << "}}";
 
     return oss.str();
 }
@@ -365,6 +402,43 @@ void OpenAIRealtimeClient::handle_message(const std::string& message) {
 
     if (type == "response.output_item.added" || type == "response.content_part.added" ||
         type == "response.output_item.done" || type == "response.content_part.done") {
+
+        if (type == "response.output_item.added") {
+            std::string item_obj = json_get_object(message, "item");
+            if (!item_obj.empty()) {
+                std::string item_type = json_get_string(item_obj, "type");
+                if (item_type == "function_call") {
+                    current_fc_call_id_ = json_get_string(item_obj, "call_id");
+                    current_fc_name_ = json_get_string(item_obj, "name");
+                    current_fc_arguments_.clear();
+                    OAI_LOG_INFO("OpenAI Realtime: function_call started: name=%s call_id=%s\n",
+                                 current_fc_name_.c_str(), current_fc_call_id_.c_str());
+                }
+            }
+        }
+
+        return;
+    }
+
+    if (type == "response.function_call_arguments.delta") {
+        std::string delta = json_get_string(message, "delta");
+        if (!delta.empty()) {
+            current_fc_arguments_ += delta;
+        }
+        return;
+    }
+
+    if (type == "response.function_call_arguments.done") {
+        std::string args = json_get_string(message, "arguments");
+        if (args.empty()) {
+            args = current_fc_arguments_;
+        }
+        OAI_LOG_INFO("OpenAI Realtime: function_call done: name=%s call_id=%s args=%s\n",
+                     current_fc_name_.c_str(), current_fc_call_id_.c_str(), args.c_str());
+        if (cb_function_call_ && !current_fc_call_id_.empty()) {
+            cb_function_call_(current_fc_call_id_, current_fc_name_, args);
+        }
+        current_fc_arguments_.clear();
         return;
     }
 

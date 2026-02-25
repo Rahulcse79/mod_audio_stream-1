@@ -4,6 +4,8 @@
 #include <memory>
 #include <cstring>
 #include <cstdlib>
+#include <string>
+#include <vector>
 
 static inline const char* get_channel_var(switch_core_session_t* session,
                                            const char* name,
@@ -44,9 +46,108 @@ static void ai_event_handler(switch_core_session_t* session,
         fs_event = EVENT_AI_TRANSCRIPT;
     } else if (event_name == "response_done") {
         fs_event = EVENT_AI_RESPONSE;
+    } else if (event_name == "function_call") {
+        fs_event = EVENT_AI_ACTION;
     }
 
     responseHandler(session, fs_event, json.c_str());
+}
+
+static std::string build_transfer_tool_json(const std::vector<std::string>& targets) {
+    std::string tool = "{\"type\":\"function\",\"name\":\"transfer_call\","
+        "\"description\":\"Transfer the current phone call to a live human agent. "
+        "Use this when the caller explicitly asks to speak to an agent, representative, "
+        "or human, or when you cannot help them further. "
+        "You MUST call this function - do NOT just say you will transfer.\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"reason\":{\"type\":\"string\",\"description\":\"Brief reason for transfer\"}"
+        "},\"required\":[\"reason\"]}}";
+    return tool;
+}
+
+static void handle_transfer_action(switch_core_session_t* session,
+                                    private_t* tech_pvt,
+                                    ai_engine::AIEngine* engine,
+                                    const std::string& call_id,
+                                    const std::string& arguments) {
+    const char* uuid = tech_pvt->sessionId;
+    switch_channel_t* channel = switch_core_session_get_channel(session);
+
+    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                      "(%s) transfer_call action triggered: args=%s\n",
+                      uuid, arguments.c_str());
+
+    int target_count = tech_pvt->ai_cfg.transfer_target_count;
+    if (target_count <= 0) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                          "(%s) No transfer targets configured\n", uuid);
+        if (engine) {
+            engine->send_action_result(call_id,
+                "{\"success\":false,\"error\":\"No transfer targets configured\"}");
+        }
+        return;
+    }
+
+    /* Try each agent in order, check if they are registered/available */
+    const char* context = switch_channel_get_variable(channel, "context");
+    if (!context || !*context) context = "default";
+    const char* dialplan = switch_channel_get_variable(channel, "dialplan");
+    if (!dialplan || !*dialplan) dialplan = "XML";
+
+    for (int i = 0; i < target_count; i++) {
+        const char* target = tech_pvt->ai_cfg.transfer_targets[i];
+        if (!target || !*target) continue;
+
+        /* Check if the extension/user is registered using show registrations or originate check */
+        char* sql = switch_mprintf("select count(*) from registrations where reg_user='%q'", target);
+        char count_str[16] = "0";
+        /* Try a sofia status check via API */
+        char api_cmd[512];
+        switch_stream_handle_t api_stream = { 0 };
+        SWITCH_STANDARD_STREAM(api_stream);
+        snprintf(api_cmd, sizeof(api_cmd), "sofia_contact */%s@${domain_name}", target);
+
+        /* Simple approach: try originate to check availability */
+        /* For now, attempt the transfer - FreeSWITCH will handle busy/unavailable */
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                          "(%s) Attempting transfer to agent: %s (target %d/%d)\n",
+                          uuid, target, i + 1, target_count);
+
+        switch_safe_free(sql);
+        switch_safe_free(api_stream.data);
+
+        /* Set channel variable so the dialplan/app knows which agent */
+        switch_channel_set_variable(channel, "ai_transfer_target", target);
+        switch_channel_set_variable(channel, "ai_transfer_reason", arguments.c_str());
+
+        /* Store the transfer info as a pending action.
+         * The actual transfer must happen on the FreeSWITCH session thread,
+         * not from a callback thread. We signal it via the action_pending atomic. */
+        switch_mutex_lock(tech_pvt->mutex);
+        snprintf(tech_pvt->pending_action, MAX_SESSION_ID, "transfer");
+        snprintf(tech_pvt->pending_action_data, MAX_METADATA_LEN, "%s", target);
+        switch_atomic_set(&tech_pvt->action_pending, SWITCH_TRUE);
+        switch_mutex_unlock(tech_pvt->mutex);
+
+        /* Send result to OpenAI so it can tell the caller */
+        if (engine) {
+            char result[512];
+            snprintf(result, sizeof(result),
+                     "{\"success\":true,\"message\":\"Transferring call to agent %s\"}",
+                     target);
+            engine->send_action_result(call_id, result);
+        }
+
+        return;
+    }
+
+    /* If we got here, no targets available */
+    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                      "(%s) All transfer targets exhausted\n", uuid);
+    if (engine) {
+        engine->send_action_result(call_id,
+            "{\"success\":false,\"error\":\"All agents are currently busy. Please try again later.\"}");
+    }
 }
 
 extern "C" {
@@ -131,6 +232,22 @@ switch_status_t ai_engine_session_init(switch_core_session_t *session,
     ai_cfg.enable_tts_cache = get_channel_var_int(session, "AI_ENABLE_TTS_CACHE", 1);
     ai_cfg.debug_ai = get_channel_var_int(session, "AI_DEBUG", 0);
 
+    /* Read transfer target extensions (AI_CALL_TRANSFER_1 .. AI_CALL_TRANSFER_10) */
+    ai_cfg.transfer_target_count = 0;
+    for (int i = 0; i < MAX_TRANSFER_TARGETS; i++) {
+        char var_name[64];
+        snprintf(var_name, sizeof(var_name), "AI_CALL_TRANSFER_%d", i + 1);
+        const char* target = switch_channel_get_variable(channel, var_name);
+        if (target && *target) {
+            safe_strncpy(ai_cfg.transfer_targets[i], target, MAX_SESSION_ID);
+            ai_cfg.transfer_target_count = i + 1;
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                              "(%s) Transfer target %d: %s\n", uuid, i + 1, target);
+        } else {
+            break;  /* Stop at first gap */
+        }
+    }
+
     if (strlen(ai_cfg.openai_api_key) == 0) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                           "(%s) AI_OPENAI_API_KEY not set — cannot start AI engine\n", uuid);
@@ -200,6 +317,20 @@ switch_status_t ai_engine_session_init(switch_core_session_t *session,
         engine_cfg.debug_logging = ai_cfg.debug_ai;
         engine_cfg.session_uuid = uuid;
         engine_cfg.inject_buffer_ms = 5000;
+
+        /* Populate transfer targets and build OpenAI tools if any targets configured */
+        for (int i = 0; i < ai_cfg.transfer_target_count; i++) {
+            engine_cfg.transfer_targets.push_back(ai_cfg.transfer_targets[i]);
+        }
+        if (ai_cfg.transfer_target_count > 0) {
+            engine_cfg.openai.tools.push_back(
+                build_transfer_tool_json(engine_cfg.transfer_targets)
+            );
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                              "(%s) Registered transfer_call tool with %d targets\n",
+                              uuid, ai_cfg.transfer_target_count);
+        }
+
         auto* engine = new ai_engine::AIEngine();
 
         std::string session_uuid_str(uuid);
@@ -212,6 +343,47 @@ switch_status_t ai_engine_session_init(switch_core_session_t *session,
                     ai_event_handler(psession, responseHandler, event_name, json);
                     switch_core_session_rwunlock(psession);
                 }
+            }
+        );
+
+        /* Set action callback for OpenAI function calls (e.g. transfer_call) */
+        engine->set_action_callback(
+            [session_uuid_str, engine](const std::string& function_name,
+                               const std::string& arguments,
+                               const std::string& call_id) {
+                switch_core_session_t* psession = switch_core_session_locate(
+                    session_uuid_str.c_str()
+                );
+                if (!psession) {
+                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                                      "Action callback: session %s not found\n",
+                                      session_uuid_str.c_str());
+                    return;
+                }
+
+                auto* bug = (switch_media_bug_t*)switch_channel_get_private(
+                    switch_core_session_get_channel(psession), MY_BUG_NAME_AI);
+                if (!bug) {
+                    switch_core_session_rwunlock(psession);
+                    return;
+                }
+                auto* pvt = (private_t*)switch_core_media_bug_get_user_data(bug);
+                if (!pvt) {
+                    switch_core_session_rwunlock(psession);
+                    return;
+                }
+
+                if (function_name == "transfer_call") {
+                    handle_transfer_action(psession, pvt, engine, call_id, arguments);
+                } else {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_WARNING,
+                                      "(%s) Unknown function call: %s\n",
+                                      pvt->sessionId, function_name.c_str());
+                    engine->send_action_result(call_id,
+                        "{\"success\":false,\"error\":\"Unknown function\"}");
+                }
+
+                switch_core_session_rwunlock(psession);
             }
         );
 
