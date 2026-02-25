@@ -317,11 +317,8 @@ private:
     alignas(kCacheLineSize) std::atomic<size_t> head_{0};
     alignas(kCacheLineSize) std::atomic<size_t> tail_{0};
     alignas(kCacheLineSize) std::atomic<bool>   flush_requested_{false};
-
-
-    char pad_[kCacheLineSize - sizeof(std::atomic<size_t>)]{};
 };
 
-}
+} // namespace ai_engine
 
 #endif

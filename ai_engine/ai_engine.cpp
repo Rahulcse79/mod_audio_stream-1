@@ -271,7 +271,7 @@ void AIEngine::handle_barge_in() {
 
     {
         std::lock_guard<std::mutex> lock(openai_mutex_);
-        if (openai_) {
+        if (openai_ && openai_->is_responding()) {
             openai_->cancel_response();
         }
     }
@@ -299,8 +299,11 @@ void AIEngine::handle_barge_in() {
         stats_.barge_ins++;
     }
 
-    if (cb_event_) {
-        cb_event_("barge_in", "{}");
+    {
+        std::lock_guard<std::mutex> lk(callback_mutex_);
+        if (cb_event_) {
+            cb_event_("barge_in", "{}");
+        }
     }
 }
 
@@ -309,8 +312,11 @@ void AIEngine::on_openai_connected(const std::string& session_id) {
                 cfg_.session_uuid.c_str(), session_id.c_str());
     set_state(AIEngineState::LISTENING, "Connected — listening for speech");
 
-    if (cb_event_) {
-        cb_event_("openai_connected", "{\"session_id\":\"" + json_escape(session_id) + "\"}");
+    {
+        std::lock_guard<std::mutex> lk(callback_mutex_);
+        if (cb_event_) {
+            cb_event_("openai_connected", "{\"session_id\":\"" + json_escape(session_id) + "\"}");
+        }
     }
 }
 
@@ -378,9 +384,12 @@ void AIEngine::on_openai_response_done(const std::string& full_text,
         });
     }
 
-    if (cb_event_) {
-        cb_event_("response_done", "{\"length\":" + std::to_string(full_text.size()) +
-                  ",\"text\":\"" + json_escape(full_text) + "\"}");
+    {
+        std::lock_guard<std::mutex> lk(callback_mutex_);
+        if (cb_event_) {
+            cb_event_("response_done", "{\"length\":" + std::to_string(full_text.size()) +
+                      ",\"text\":\"" + json_escape(full_text) + "\"}");
+        }
     }
 }
 
@@ -403,24 +412,33 @@ void AIEngine::on_openai_speech_started() {
         set_state(AIEngineState::LISTENING, "User speaking");
     }
 
-    if (cb_event_) {
-        cb_event_("speech_started", "{}");
+    {
+        std::lock_guard<std::mutex> lk(callback_mutex_);
+        if (cb_event_) {
+            cb_event_("speech_started", "{}");
+        }
     }
 }
 
 void AIEngine::on_openai_speech_stopped() {
     AI_LOG_INFO("(%s) Speech stopped (VAD)\n", cfg_.session_uuid.c_str());
 
-    if (cb_event_) {
-        cb_event_("speech_stopped", "{}");
+    {
+        std::lock_guard<std::mutex> lk(callback_mutex_);
+        if (cb_event_) {
+            cb_event_("speech_stopped", "{}");
+        }
     }
 }
 
 void AIEngine::on_openai_input_transcript(const std::string& transcript) {
     AI_LOG_INFO("(%s) User said: '%s'\n", cfg_.session_uuid.c_str(), transcript.c_str());
 
-    if (cb_event_) {
-        cb_event_("user_transcript", "{\"transcript\":\"" + json_escape(transcript) + "\"}");
+    {
+        std::lock_guard<std::mutex> lk(callback_mutex_);
+        if (cb_event_) {
+            cb_event_("user_transcript", "{\"transcript\":\"" + json_escape(transcript) + "\"}");
+        }
     }
 }
 
@@ -429,9 +447,12 @@ void AIEngine::on_openai_error(const std::string& error, const std::string& code
                  cfg_.session_uuid.c_str(), error.c_str(), code.c_str());
     set_state(AIEngineState::ERROR, error);
 
-    if (cb_event_) {
-        cb_event_("openai_error", "{\"error\":\"" + json_escape(error) +
-                  "\",\"code\":\"" + json_escape(code) + "\"}");
+    {
+        std::lock_guard<std::mutex> lk(callback_mutex_);
+        if (cb_event_) {
+            cb_event_("openai_error", "{\"error\":\"" + json_escape(error) +
+                      "\",\"code\":\"" + json_escape(code) + "\"}");
+        }
     }
 }
 
@@ -521,15 +542,18 @@ void AIEngine::on_openai_function_call(const std::string& call_id,
                 cfg_.session_uuid.c_str(), function_name.c_str(),
                 call_id.c_str(), arguments.c_str());
 
-    if (cb_action_) {
-        cb_action_(function_name, arguments, call_id);
-    }
+    {
+        std::lock_guard<std::mutex> lk(callback_mutex_);
+        if (cb_action_) {
+            cb_action_(function_name, arguments, call_id);
+        }
 
-    if (cb_event_) {
-        cb_event_("function_call",
-                  "{\"function\":\"" + json_escape(function_name) +
-                  "\",\"arguments\":\"" + json_escape(arguments) +
-                  "\",\"call_id\":\"" + json_escape(call_id) + "\"}");
+        if (cb_event_) {
+            cb_event_("function_call",
+                      "{\"function\":\"" + json_escape(function_name) +
+                      "\",\"arguments\":\"" + json_escape(arguments) +
+                      "\",\"call_id\":\"" + json_escape(call_id) + "\"}");
+        }
     }
 }
 
@@ -655,8 +679,12 @@ void AIEngine::on_tts_audio(const int16_t* samples, size_t count,
     if (tts_abort_.load(std::memory_order_acquire)) return;
 
     ring_buffer_->write_pcm16(resampled.data(), resampled.size());
-    if (cb_audio_) {
-        cb_audio_(resampled.data(), resampled.size(), cfg_.freeswitch_sample_rate);
+
+    {
+        std::lock_guard<std::mutex> lk(callback_mutex_);
+        if (cb_audio_) {
+            cb_audio_(resampled.data(), resampled.size(), cfg_.freeswitch_sample_rate);
+        }
     }
 }
 
@@ -743,13 +771,17 @@ void AIEngine::resample_down(const int16_t* in, size_t in_samples,
 
 void AIEngine::set_state(AIEngineState new_state, const std::string& detail) {
     AIEngineState old_state = state_.exchange(new_state, std::memory_order_acq_rel);
-    if (old_state != new_state && cb_state_) {
-        cb_state_(new_state, detail);
+    if (old_state != new_state) {
+        std::lock_guard<std::mutex> lk(callback_mutex_);
+        if (cb_state_) {
+            cb_state_(new_state, detail);
+        }
     }
 }
 
 void AIEngine::flush_tts_queue() {
     std::lock_guard<std::mutex> lock(tts_queue_mutex_);
+    tts_abort_.store(true, std::memory_order_release);
     while (!tts_queue_.empty()) {
         tts_queue_.pop();
     }
@@ -760,4 +792,4 @@ AIEngine::Stats AIEngine::get_stats() const {
     return stats_;
 }
 
-}
+} // namespace ai_engine

@@ -112,7 +112,7 @@ bool ensure_schema(const DBConfig& cfg) {
             "  extension             TEXT,"
             "  conversation_wav_file TEXT,"
             "  conversation_text     TEXT,"
-            "  created_at            TIMESTAMPTZ DEFAULT NOW()"
+            "  created_at            BIGINT"
             ")";
 
         PGresult* res = PQexec(conn, create_table_sql);
@@ -121,6 +121,31 @@ bool ensure_schema(const DBConfig& cfg) {
             PQclear(res);
             PQfinish(conn);
             return false;
+        }
+        PQclear(res);
+
+        /* Migration: if created_at is TIMESTAMPTZ (old schema), drop and re-add as BIGINT.
+         * Also drop call_epoch if it exists from prior versions. */
+        const char* migrate_sql =
+            "DO $$ BEGIN "
+            "  IF EXISTS ("
+            "    SELECT 1 FROM information_schema.columns "
+            "    WHERE table_name='telemetry' AND column_name='call_epoch'"
+            "  ) THEN "
+            "    ALTER TABLE telemetry DROP COLUMN call_epoch;"
+            "  END IF; "
+            "  IF EXISTS ("
+            "    SELECT 1 FROM information_schema.columns "
+            "    WHERE table_name='telemetry' AND column_name='created_at' "
+            "      AND data_type <> 'bigint'"
+            "  ) THEN "
+            "    ALTER TABLE telemetry DROP COLUMN created_at;"
+            "    ALTER TABLE telemetry ADD COLUMN created_at BIGINT;"
+            "  END IF; "
+            "END $$";
+        res = PQexec(conn, migrate_sql);
+        if (PQresultStatus(res) != PGRES_COMMAND_OK) {
+            TDB_LOG_WARN("[telemetry] Schema migration warning: %s\n", PQerrorMessage(conn));
         }
         PQclear(res);
 
@@ -143,18 +168,22 @@ bool insert_call_record(const DBConfig& cfg, const CallRecord& rec) {
     /* Use parameterised query to avoid SQL injection */
     const char* sql =
         "INSERT INTO telemetry "
-        "(channel_id, channel_details, extension, conversation_wav_file, conversation_text) "
-        "VALUES ($1, $2, $3, $4, $5)";
+        "(channel_id, channel_details, extension, conversation_wav_file, conversation_text, created_at) "
+        "VALUES ($1, $2, $3, $4, $5, $6)";
 
-    const char* params[5] = {
+    /* Convert epoch to string for PQexecParams (text mode) */
+    std::string epoch_str = std::to_string(rec.created_at);
+
+    const char* params[6] = {
         rec.channel_id.c_str(),
         rec.channel_details.c_str(),
         rec.extension.c_str(),
         rec.conversation_wav_file.c_str(),
-        rec.conversation_text.c_str()
+        rec.conversation_text.c_str(),
+        epoch_str.c_str()
     };
 
-    PGresult* res = PQexecParams(conn, sql, 5, NULL, params, NULL, NULL, 0);
+    PGresult* res = PQexecParams(conn, sql, 6, NULL, params, NULL, NULL, 0);
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
         TDB_LOG_ERR("[telemetry] INSERT failed: %s\n", PQerrorMessage(conn));
         PQclear(res);

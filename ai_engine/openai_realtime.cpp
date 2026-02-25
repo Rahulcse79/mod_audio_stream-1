@@ -364,6 +364,16 @@ void OpenAIRealtimeClient::handle_message(const std::string& message) {
         return;
     }
 
+    /* Acknowledge known informational events that need no action */
+    if (type == "input_audio_buffer.committed" ||
+        type == "input_audio_buffer.cleared" ||
+        type == "conversation.item.created" ||
+        type == "conversation.item.deleted" ||
+        type == "conversation.item.truncated" ||
+        type == "conversation.item.input_audio_transcription.delta") {
+        return;
+    }
+
     if (type == "conversation.item.input_audio_transcription.completed") {
         std::string transcript = json_get_string(message, "transcript");
         if (cb_input_transcript_ && !transcript.empty())
@@ -479,4 +489,4 @@ void OpenAIRealtimeClient::handle_message(const std::string& message) {
     OAI_LOG_DEBUG("OpenAI Realtime: unhandled event: %s\n", type.c_str());
 }
 
-}
+} // namespace ai_engine

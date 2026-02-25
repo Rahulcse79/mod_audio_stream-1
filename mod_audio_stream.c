@@ -340,6 +340,8 @@ static switch_status_t start_capture_ai(switch_core_session_t *session)
         return SWITCH_STATUS_FALSE;
     }
 
+    tech_pvt = (private_t *)pUserData;
+
     switch_media_bug_flag_t flags = SMBF_READ_STREAM | SMBF_WRITE_REPLACE;
 
     if (switch_core_media_bug_add(
@@ -483,6 +485,24 @@ SWITCH_STANDARD_APP(audio_stream_ai_app_function)
         return;
     }
 
+    /* If the channel is not yet answered, send early-media ringback
+     * so the caller hears a ringing tone while the AI engine starts up. */
+    if (!switch_channel_test_flag(channel, CF_ANSWERED)) {
+        switch_channel_pre_answer(channel);
+        switch_channel_set_variable(channel, "ringback", "%(2000,4000,440,480)");
+        switch_channel_ring_ready(channel);
+        /* Play a brief ringback so the caller hears something while we
+         * answer and connect to the AI backend.  We answer immediately
+         * after so that the media bug can be installed. */
+        switch_ivr_play_file(session, NULL, "tone_stream://%(2000,4000,440,480);loops=1", NULL);
+    }
+
+    /* Ensure the channel is fully answered before installing the media
+     * bug — the codec must be negotiated for read/write to work. */
+    if (!switch_channel_test_flag(channel, CF_ANSWERED)) {
+        switch_channel_answer(channel);
+    }
+
     if (start_capture_ai(session) != SWITCH_STATUS_SUCCESS) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                           "audio_stream_ai app: failed to start AI engine\n");
@@ -491,23 +511,39 @@ SWITCH_STANDARD_APP(audio_stream_ai_app_function)
 
     /* Start WAV recording if wav_file_path was configured.
      * The full path (dir/uuid.wav) was built by ai_engine_session_init
-     * and stored in ai_cfg.recording_path. */
+     * and stored in ai_cfg.recording_path.
+     * NOTE: requires mod_sndfile to be loaded for WAV support.
+     * We verify the file interface exists before calling record. */
     char recording_path[MAX_METADATA_LEN] = {0};
     {
         switch_media_bug_t *bug = (switch_media_bug_t *)switch_channel_get_private(channel, MY_BUG_NAME_AI);
         if (bug) {
             private_t *tp = (private_t *)switch_core_media_bug_get_user_data(bug);
             if (tp && tp->ai_cfg.recording_path[0]) {
-                strncpy(recording_path, tp->ai_cfg.recording_path, MAX_METADATA_LEN - 1);
-                switch_status_t rec_status = switch_ivr_record_session(session, recording_path, 0, NULL);
-                if (rec_status == SWITCH_STATUS_SUCCESS) {
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
-                                      "(%s) WAV recording started: %s\n", uuid, recording_path);
+                /* Verify that a file interface for wav exists (i.e. mod_sndfile is loaded) */
+                const char *ext = strrchr(tp->ai_cfg.recording_path, '.');
+                if (ext) ext++; /* skip the dot */
+                if (!ext) ext = "wav";
+
+                switch_file_interface_t *fi = switch_loadable_module_get_file_interface(ext, NULL);
+                if (!fi) {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                                      "(%s) No file interface for '%s' — is mod_sndfile loaded? "
+                                      "WAV recording disabled for this call.\n", uuid, ext);
+                    tp->ai_cfg.recording_path[0] = '\0';
                 } else {
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                                      "(%s) WAV recording FAILED to start: %s "
-                                      "(is mod_sndfile loaded?)\n", uuid, recording_path);
-                    recording_path[0] = '\0';   /* clear so we don't try to stop later */
+                    strncpy(recording_path, tp->ai_cfg.recording_path, MAX_METADATA_LEN - 1);
+                    switch_status_t rec_status = switch_ivr_record_session(session, recording_path, 0, NULL);
+                    if (rec_status == SWITCH_STATUS_SUCCESS) {
+                        switch_atomic_set(&tp->recording_started, SWITCH_TRUE);
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+                                          "(%s) WAV recording started: %s\n", uuid, recording_path);
+                    } else {
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                                          "(%s) WAV recording FAILED to start: %s\n", uuid, recording_path);
+                        tp->ai_cfg.recording_path[0] = '\0';
+                        recording_path[0] = '\0';
+                    }
                 }
             }
         }
@@ -544,19 +580,19 @@ SWITCH_STANDARD_APP(audio_stream_ai_app_function)
         tech_pvt->pending_action[0] = '\0';
         tech_pvt->pending_action_data[0] = '\0';
 
-        /* Save the transfer targets locally before we destroy the bug */
-        int target_count = tech_pvt->ai_cfg.transfer_target_count;
-        char targets[MAX_TRANSFER_TARGETS][MAX_SESSION_ID];
-        for (int i = 0; i < target_count && i < MAX_TRANSFER_TARGETS; i++) {
-            strncpy(targets[i], tech_pvt->ai_cfg.transfer_targets[i], MAX_SESSION_ID);
-            targets[i][MAX_SESSION_ID - 1] = '\0';
-        }
+        /* Save the transfer config locally before we destroy the bug */
+        char xfer_ext[MAX_SESSION_ID] = {0};
+        char xfer_host[MAX_SESSION_ID] = {0};
+        char xfer_port[16] = {0};
+        strncpy(xfer_ext, tech_pvt->ai_cfg.transfer_extension, MAX_SESSION_ID - 1);
+        strncpy(xfer_host, tech_pvt->ai_cfg.transfer_host, MAX_SESSION_ID - 1);
+        strncpy(xfer_port, tech_pvt->ai_cfg.transfer_port, sizeof(xfer_port) - 1);
         switch_mutex_unlock(tech_pvt->mutex);
 
         if (!strcmp(action, "bridge")) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                              "(%s) Bridge action: stopping AI engine, trying %d agents\n",
-                              uuid, target_count);
+                              "(%s) Bridge action: stopping AI engine, transferring to %s@%s:%s\n",
+                              uuid, xfer_ext, xfer_host, xfer_port);
 
             /* 1) Stop the AI engine and remove the media bug.
              *    This disconnects OpenAI/TTS and frees resources.
@@ -565,82 +601,107 @@ SWITCH_STANDARD_APP(audio_stream_ai_app_function)
             tech_pvt = NULL;
             bug = NULL;
 
-            /* 2) Try each agent target in priority order via bridge */
-            int bridged = 0;
-            const char *domain = switch_channel_get_variable(channel, "domain_name");
-            if (!domain || !*domain) domain = "localhost";
+            /* 2) Bridge to agent via SIP: user/ext@domain
+             *
+             *    CRITICAL: When FreeSWITCH bridges a call from itself back to
+             *    itself (same SIP profile), the inbound B-leg is detected as a
+             *    "looped call" (sip_looped_call=true).  The default public
+             *    dialplan contains an "unloop" extension that deflects such
+             *    calls, which prevents the transfer from completing.
+             *
+             *    Fix: Use the user/ endpoint instead of sofia/internal/ so that
+             *    FreeSWITCH routes via the user directory (default context)
+             *    without generating a SIP INVITE to itself.  This avoids the
+             *    loop detection entirely.
+             *
+             *    If user/ is not viable (e.g. external target), we fall back
+             *    to sofia/ with explicit context override via
+             *    sip_invite_params and transfer_after_bridge to land the
+             *    B-leg in the "default" context. */
+            if (switch_channel_ready(channel) && xfer_ext[0] && xfer_host[0]) {
+                char dial_string[1024];
 
-            for (int i = 0; i < target_count; i++) {
-                if (!switch_channel_ready(channel)) break;
+                switch_channel_set_variable(channel, "ai_transfer_target", xfer_ext);
+
+                /* Use the user/ endpoint which routes through the local
+                 * directory → default context, bypassing SIP loop detection.
+                 * We also set sip_looped_call=false on the B-leg in case
+                 * it still ends up going through Sofia.
+                 *
+                 * origination_caller_id: pass the original caller's ID
+                 * so the agent sees who is calling.
+                 *
+                 * If user/ fails (e.g. unregistered), the bridge will
+                 * return an error and the AI engine will be restarted to
+                 * inform the caller. */
+                const char *orig_cid_num = switch_channel_get_variable(channel, "caller_id_number");
+                const char *orig_cid_name = switch_channel_get_variable(channel, "caller_id_name");
+                if (!orig_cid_num || !*orig_cid_num) orig_cid_num = "unknown";
+                if (!orig_cid_name || !*orig_cid_name) orig_cid_name = "AI Transfer";
+
+                /* Try user/ first (local directory, avoids SIP loopback).
+                 * Fallback to loopback/ with default context if user/
+                 * endpoint is not available. The loopback endpoint
+                 * creates an internal call that enters the dialplan in
+                 * the specified context, bypassing the public context
+                 * and its unloop extension. */
+                snprintf(dial_string, sizeof(dial_string),
+                         "{call_timeout=30"
+                         ",hangup_after_bridge=true"
+                         ",origination_caller_id_number=%s"
+                         ",origination_caller_id_name=%s"
+                         ",sip_looped_call=false"
+                         ",originate_timeout=30"
+                         "}user/%s@%s"
+                         "|loopback/%s/default",
+                         orig_cid_num, orig_cid_name, xfer_ext, xfer_host,
+                         xfer_ext);
 
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                  "(%s) Trying agent %d/%d: %s\n",
-                                  uuid, i + 1, target_count, targets[i]);
+                                  "(%s) Bridging to: %s\n", uuid, dial_string);
 
-                /* Build bridge dial string: user/1003@domain
-                 * call_timeout=30 gives agent 30 seconds to pick up
-                 * The bridge app will ring the agent and connect the caller
-                 * directly when the agent answers. */
-                char dial_string[1024];
-                snprintf(dial_string, sizeof(dial_string),
-                         "{call_timeout=30,hangup_after_bridge=true}user/%s@%s",
-                         targets[i], domain);
-
-                switch_channel_set_variable(channel, "ai_transfer_target", targets[i]);
-
-                /* Set ringback so the caller hears ringing while agent phone rings */
+                /* Ensure the caller hears a ringback tone while the
+                 * agent's phone is ringing.  Setting 'ringback' on the
+                 * A-leg channel makes FreeSWITCH generate the tone
+                 * locally if no early media arrives from the B-leg.
+                 * 'transfer_ringback' covers the attended-transfer case. */
                 switch_channel_set_variable(channel, "ringback", "%(2000,4000,440,480)");
+                switch_channel_set_variable(channel, "transfer_ringback", "%(2000,4000,440,480)");
 
-                /* Execute the bridge application — this blocks until:
-                 *   - Agent answers → caller & agent are connected → blocks until hangup
-                 *   - Agent busy/no-answer/reject → returns immediately
-                 * On success the caller talked to the agent and one side hung up. */
                 switch_core_session_execute_application(session, "bridge", dial_string);
 
-                /* Check if the bridge succeeded by looking at the channel state.
-                 * After a successful bridge + hangup, the channel may be done. */
-                const char *cause_str = switch_channel_get_variable(channel, "DIALSTATUS");
-                if (!cause_str) cause_str = switch_channel_get_variable(channel, "originate_disposition");
-
-                if (cause_str && !strcasecmp(cause_str, "SUCCESS")) {
+                /* Check bridge result — channel may be gone if bridged successfully */
+                if (!switch_channel_ready(channel)) {
+                    /* Channel ended (caller hung up or successful transfer) */
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                      "(%s) Bridge to %s completed — call ended\n",
-                                      uuid, targets[i]);
-                    bridged = 1;
+                                      "(%s) Bridge to %s@%s:%s completed (channel ended)\n",
+                                      uuid, xfer_ext, xfer_host, xfer_port);
                     break;
                 }
 
-                /* If channel is no longer ready, the bridge worked and someone hung up */
-                if (!switch_channel_ready(channel)) {
+                const char *cause_str = switch_channel_get_variable(channel, "originate_disposition");
+                if (!cause_str) cause_str = switch_channel_get_variable(channel, "DIALSTATUS");
+
+                if (cause_str && (!strcasecmp(cause_str, "SUCCESS") ||
+                                  !strcasecmp(cause_str, "NORMAL_CLEARING"))) {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                      "(%s) Bridge to %s — channel done after bridge\n",
-                                      uuid, targets[i]);
-                    bridged = 1;
+                                      "(%s) Bridge to %s@%s:%s completed successfully\n",
+                                      uuid, xfer_ext, xfer_host, xfer_port);
                     break;
                 }
 
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-                                  "(%s) Bridge to %s failed (%s), trying next agent...\n",
-                                  uuid, targets[i],
+                                  "(%s) Bridge to %s@%s:%s failed (%s)\n",
+                                  uuid, xfer_ext, xfer_host, xfer_port,
                                   cause_str ? cause_str : "unknown");
             }
 
-            if (bridged) {
-                /* Agent call is done (agent or caller hung up). End the app. */
-                break;
-            }
-
-            /* All agents busy/unavailable — restart AI and let it tell the caller */
+            /* Agent unavailable — restart AI and let it tell the caller */
             if (switch_channel_ready(channel)) {
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-                                  "(%s) All %d agents unavailable — restarting AI engine\n",
-                                  uuid, target_count);
+                                  "(%s) Agent unavailable — restarting AI engine\n", uuid);
 
-                /* Restart the AI engine so it can talk to the caller again */
                 if (start_capture_ai(session) == SWITCH_STATUS_SUCCESS) {
-                    /* Continue the while loop — AI will resume and tell the caller
-                     * about the failed transfer (via the function_call_output result
-                     * that was already sent to OpenAI before we stopped) */
                     continue;
                 } else {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,

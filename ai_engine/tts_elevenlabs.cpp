@@ -234,7 +234,9 @@ bool ElevenLabsTTS::synthesize(
             audio_cb(nullptr, 0, true, text);
         }
         success = true;
-    } else if (res == CURLE_ABORTED_BY_CALLBACK) {
+    } else if (res == CURLE_ABORTED_BY_CALLBACK ||
+               abort_flag.load(std::memory_order_relaxed)) {
+        /* Intentional abort (barge-in or shutdown) — not an error */
         success = false;
     } else {
         std::string err_msg;

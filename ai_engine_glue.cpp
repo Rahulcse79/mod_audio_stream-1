@@ -5,6 +5,7 @@
 #include <memory>
 #include <cstring>
 #include <cstdlib>
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -118,7 +119,7 @@ static void ai_event_handler(switch_core_session_t* session,
     responseHandler(session, fs_event, json.c_str());
 }
 
-static std::string build_transfer_tool_json(const std::vector<std::string>& targets) {
+static std::string build_transfer_tool_json() {
     std::string tool = "{\"type\":\"function\",\"name\":\"transfer_call\","
         "\"description\":\"Transfer the current phone call to a live human agent. "
         "Use this when the caller explicitly asks to speak to an agent, representative, "
@@ -142,13 +143,12 @@ static void handle_transfer_action(switch_core_session_t* session,
                       "(%s) transfer_call action triggered: args=%s\n",
                       uuid, arguments.c_str());
 
-    int target_count = tech_pvt->ai_cfg.transfer_target_count;
-    if (target_count <= 0) {
+    if (!tech_pvt->ai_cfg.transfer_extension[0]) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-                          "(%s) No transfer targets configured\n", uuid);
+                          "(%s) No transfer extension configured (AI_CALL_TRANSFER_EXTENSION)\n", uuid);
         if (engine) {
             engine->send_action_result(call_id,
-                "{\"success\":false,\"error\":\"No transfer targets configured\"}");
+                "{\"success\":false,\"error\":\"No transfer extension configured\"}");
         }
         return;
     }
@@ -162,11 +162,10 @@ static void handle_transfer_action(switch_core_session_t* session,
     /* Set channel variables for the app function to pick up */
     switch_channel_set_variable(channel, "ai_transfer_reason", arguments.c_str());
 
-    /* Signal the app function to perform the bridge.
-     * We pass "bridge" as the action — the app function will iterate all targets. */
+    /* Signal the app function to perform the bridge */
     switch_mutex_lock(tech_pvt->mutex);
     snprintf(tech_pvt->pending_action, MAX_SESSION_ID, "bridge");
-    tech_pvt->pending_action_data[0] = '\0';  /* app function uses transfer_targets[] directly */
+    tech_pvt->pending_action_data[0] = '\0';
     switch_atomic_set(&tech_pvt->action_pending, SWITCH_TRUE);
     switch_mutex_unlock(tech_pvt->mutex);
 }
@@ -253,20 +252,20 @@ switch_status_t ai_engine_session_init(switch_core_session_t *session,
     ai_cfg.enable_tts_cache = get_channel_var_int(session, "AI_ENABLE_TTS_CACHE", 1);
     ai_cfg.debug_ai = get_channel_var_int(session, "AI_DEBUG", 0);
 
-    /* Read transfer target extensions (AI_CALL_TRANSFER_1 .. AI_CALL_TRANSFER_10) */
-    ai_cfg.transfer_target_count = 0;
-    for (int i = 0; i < MAX_TRANSFER_TARGETS; i++) {
-        char var_name[64];
-        snprintf(var_name, sizeof(var_name), "AI_CALL_TRANSFER_%d", i + 1);
-        const char* target = switch_channel_get_variable(channel, var_name);
-        if (target && *target) {
-            safe_strncpy(ai_cfg.transfer_targets[i], target, MAX_SESSION_ID);
-            ai_cfg.transfer_target_count = i + 1;
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                              "(%s) Transfer target %d: %s\n", uuid, i + 1, target);
-        } else {
-            break;  /* Stop at first gap */
-        }
+    /* Read transfer call config: extension, host, port */
+    safe_strncpy(ai_cfg.transfer_extension,
+                 get_channel_var(session, "AI_CALL_TRANSFER_EXTENSION", ""),
+                 MAX_SESSION_ID);
+    safe_strncpy(ai_cfg.transfer_host,
+                 get_channel_var(session, "AI_CALL_TRANSFER_HOST", ""),
+                 MAX_SESSION_ID);
+    safe_strncpy(ai_cfg.transfer_port,
+                 get_channel_var(session, "AI_CALL_TRANSFER_PORT", "5060"),
+                 sizeof(ai_cfg.transfer_port));
+    if (ai_cfg.transfer_extension[0]) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                          "(%s) Transfer config: %s@%s:%s\n", uuid,
+                          ai_cfg.transfer_extension, ai_cfg.transfer_host, ai_cfg.transfer_port);
     }
 
     /* Read PostgreSQL telemetry config */
@@ -329,12 +328,12 @@ switch_status_t ai_engine_session_init(switch_core_session_t *session,
     if (strlen(ai_cfg.openai_api_key) == 0) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                           "(%s) AI_OPENAI_API_KEY not set — cannot start AI engine\n", uuid);
-        return SWITCH_STATUS_FALSE;
+        goto init_error;
     }
     if (strcmp(ai_cfg.tts_provider, "elevenlabs") == 0 && strlen(ai_cfg.elevenlabs_api_key) == 0) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                           "(%s) AI_ELEVENLABS_API_KEY not set — cannot start ElevenLabs TTS\n", uuid);
-        return SWITCH_STATUS_FALSE;
+        goto init_error;
     }
 
     tech_pvt->inject_buffer = NULL;
@@ -396,17 +395,18 @@ switch_status_t ai_engine_session_init(switch_core_session_t *session,
         engine_cfg.session_uuid = uuid;
         engine_cfg.inject_buffer_ms = 5000;
 
-        /* Populate transfer targets and build OpenAI tools if any targets configured */
-        for (int i = 0; i < ai_cfg.transfer_target_count; i++) {
-            engine_cfg.transfer_targets.push_back(ai_cfg.transfer_targets[i]);
-        }
-        if (ai_cfg.transfer_target_count > 0) {
+        /* Register transfer_call tool with OpenAI if transfer is configured */
+        if (ai_cfg.transfer_extension[0]) {
+            engine_cfg.transfer_extension = ai_cfg.transfer_extension;
+            engine_cfg.transfer_host = ai_cfg.transfer_host;
+            engine_cfg.transfer_port = ai_cfg.transfer_port;
             engine_cfg.openai.tools.push_back(
-                build_transfer_tool_json(engine_cfg.transfer_targets)
+                build_transfer_tool_json()
             );
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                              "(%s) Registered transfer_call tool with %d targets\n",
-                              uuid, ai_cfg.transfer_target_count);
+                              "(%s) Registered transfer_call tool: %s@%s:%s\n",
+                              uuid, ai_cfg.transfer_extension,
+                              ai_cfg.transfer_host, ai_cfg.transfer_port);
         }
 
         auto* engine = new ai_engine::AIEngine();
@@ -469,11 +469,15 @@ switch_status_t ai_engine_session_init(switch_core_session_t *session,
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                               "(%s) Failed to start AI engine\n", uuid);
             delete engine;
-            return SWITCH_STATUS_FALSE;
+            goto init_error;
         }
 
         tech_pvt->pAIEngine = engine;
     }
+
+    /* Reset cleanup_started for re-init after transfer failure */
+    switch_atomic_set(&tech_pvt->cleanup_started, SWITCH_FALSE);
+    switch_atomic_set(&tech_pvt->close_requested, SWITCH_FALSE);
 
     *ppUserData = tech_pvt;
 
@@ -483,6 +487,14 @@ switch_status_t ai_engine_session_init(switch_core_session_t *session,
                       ai_cfg.elevenlabs_voice_id, ai_cfg.enable_barge_in);
 
     return SWITCH_STATUS_SUCCESS;
+
+init_error:
+    /* Clean up conversation_text on early failure */
+    if (tech_pvt->conversation_text) {
+        delete static_cast<std::string*>(tech_pvt->conversation_text);
+        tech_pvt->conversation_text = nullptr;
+    }
+    return SWITCH_STATUS_FALSE;
 }
 
 switch_bool_t ai_engine_feed_frame(switch_media_bug_t *bug) {
@@ -525,8 +537,10 @@ switch_status_t ai_engine_session_cleanup(switch_core_session_t *session,
     auto *bug = (switch_media_bug_t*)switch_channel_get_private(channel, MY_BUG_NAME_AI);
 
     if (!bug) {
+        /* This is expected when called from the CLOSE callback after the
+         * bridge-action cleanup has already cleared the private data. */
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                          "ai_engine_session_cleanup: no bug found\n");
+                          "ai_engine_session_cleanup: no bug found (already cleaned up)\n");
         return SWITCH_STATUS_FALSE;
     }
 
@@ -606,8 +620,9 @@ switch_status_t ai_engine_session_cleanup(switch_core_session_t *session,
             rec.extension = caller ? caller : "";
         }
 
-        /* Recording WAV path — only set if recording was actually configured */
-        if (tech_pvt->ai_cfg.recording_path[0]) {
+        /* Recording WAV path — only set if recording actually started successfully */
+        if (tech_pvt->ai_cfg.recording_path[0] &&
+            switch_atomic_read(&tech_pvt->recording_started)) {
             rec.conversation_wav_file = tech_pvt->ai_cfg.recording_path;
         } else {
             rec.conversation_wav_file = "";
@@ -618,9 +633,13 @@ switch_status_t ai_engine_session_cleanup(switch_core_session_t *session,
             rec.conversation_text = *static_cast<std::string*>(tech_pvt->conversation_text);
         }
 
+        /* Always save current Unix epoch as created_at */
+        rec.created_at = (int64_t)time(NULL);
+
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                          "(%s) Saving telemetry to DB: ext=%s text_len=%zu\n",
+                          "(%s) Saving telemetry to DB: ext=%s created_at=%lld text_len=%zu\n",
                           tech_pvt->sessionId, rec.extension.c_str(),
+                          (long long)rec.created_at,
                           rec.conversation_text.size());
 
         telemetry::insert_call_record(dbcfg, rec);

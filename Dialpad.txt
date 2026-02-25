@@ -26,15 +26,15 @@
         <action application="set" data="AI_DEBUG=1"/>
 
         <!--
-          Transfer target priority list.
-          When caller says "transfer to agent", module tries each in order:
-            1003 → if busy → 1004 → if busy → 1005
+          Transfer call configuration.
+          When caller says "transfer to agent", module bridges to:
+            sofia/internal/{extension}@{host}:{port}
           If agent answers, AI disconnects and caller talks directly to agent.
-          If ALL agents are busy, AI tells the caller.
+          If agent is busy, AI tells the caller.
         -->
-        <action application="set" data="AI_CALL_TRANSFER_1=1003"/>
-        <action application="set" data="AI_CALL_TRANSFER_2=1004"/>
-        <action application="set" data="AI_CALL_TRANSFER_3=1005"/>
+        <action application="set" data="AI_CALL_TRANSFER_EXTENSION=1003"/>
+        <action application="set" data="AI_CALL_TRANSFER_HOST=172.20.10.3"/>
+        <action application="set" data="AI_CALL_TRANSFER_PORT=5060"/>
 
         <!--
           PostgreSQL Telemetry: saves call data after hangup.
@@ -58,10 +58,10 @@
         -->
         <action application="set" data="wav_file_path=/tmp"/>
 
-        <!-- Call setup -->
+        <!-- Call setup: ring for 2 seconds, then answer and start AI -->
         <action application="ring_ready"/>
+        <action application="sleep" data="2000"/>
         <action application="answer"/>
-        <action application="sleep" data="300"/>
 
         <!-- Start AI Voice Agent (handles everything until hangup or transfer) -->
         <action application="audio_stream_ai"/>

@@ -27,8 +27,6 @@ extern "C" {
 #define EVENT_AI_RESPONSE  "mod_audio_stream::ai_response"
 #define EVENT_AI_ACTION    "mod_audio_stream::ai_action"
 
-#define MAX_TRANSFER_TARGETS  10
-
 typedef void (*responseHandler_t)(
     switch_core_session_t* session,
     const char* eventName,
@@ -74,8 +72,9 @@ struct ai_engine_config {
     int    enable_barge_in;
     int    enable_tts_cache;
     int    debug_ai;
-    char   transfer_targets[MAX_TRANSFER_TARGETS][MAX_SESSION_ID];
-    int    transfer_target_count;
+    char   transfer_extension[MAX_SESSION_ID];
+    char   transfer_host[MAX_SESSION_ID];
+    char   transfer_port[16];
 
     /* PostgreSQL telemetry */
     int    db_enabled;
@@ -136,6 +135,9 @@ struct private_data {
     volatile switch_atomic_t action_pending;
     char pending_action[MAX_SESSION_ID];
     char pending_action_data[MAX_METADATA_LEN];
+
+    /* WAV recording: set to true when switch_ivr_record_session succeeds */
+    volatile switch_atomic_t recording_started;
 
     /* Telemetry: accumulated conversation text (user + AI lines) */
     void *conversation_text;   /* pointer to a C++ std::string, cast in glue */

@@ -15,10 +15,11 @@
  *   extension             TEXT       — caller extension (e.g. "1002")
  *   conversation_wav_file TEXT       — path to call recording WAV
  *   conversation_text     TEXT       — accumulated user + AI transcript
- *   created_at            TIMESTAMPTZ DEFAULT NOW()
+ *   created_at            BIGINT     — Unix epoch seconds at time of save
  */
 
 #include <string>
+#include <cstdint>
 
 namespace telemetry {
 
@@ -36,6 +37,7 @@ struct CallRecord {
     std::string extension;
     std::string conversation_wav_file;
     std::string conversation_text;
+    int64_t     created_at = 0;   // Unix epoch seconds — always set before insert
 };
 
 /*

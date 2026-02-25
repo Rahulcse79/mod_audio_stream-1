@@ -10,6 +10,7 @@
 #include <functional>
 #include <cstdint>
 #include <cstdio>
+#include <vector>
 #include "openai_realtime.h"
 #include "sentence_buffer.h"
 #include "tts_engine.h"
@@ -69,7 +70,9 @@ struct AIEngineConfig {
     bool debug_logging          = false;
     std::string session_uuid;              
 
-    std::vector<std::string> transfer_targets;
+    std::string transfer_extension;
+    std::string transfer_host;
+    std::string transfer_port;
 };
 
 enum class AIEngineState {
@@ -102,21 +105,21 @@ public:
 
     AIEngine(const AIEngine&) = delete;
     AIEngine& operator=(const AIEngine&) = delete;
-    bool start(const AIEngineConfig& cfg, switch_core_session_t* session);
+    [[nodiscard]] bool start(const AIEngineConfig& cfg, switch_core_session_t* session);
     void stop();
-    bool is_running() const;
+    [[nodiscard]] bool is_running() const;
     void feed_audio(const int16_t* samples, size_t num_samples);
-    size_t read_audio(int16_t* dest, size_t num_samples);
-    double available_audio_ms() const;
+    [[nodiscard]] size_t read_audio(int16_t* dest, size_t num_samples);
+    [[nodiscard]] double available_audio_ms() const;
     void handle_barge_in();
-    void set_state_callback(OnStateChange cb)  { cb_state_ = std::move(cb); }
-    void set_audio_callback(OnAudioReady cb)   { cb_audio_ = std::move(cb); }
-    void set_event_callback(OnAIEvent cb)      { cb_event_ = std::move(cb); }
-    void set_action_callback(OnActionRequest cb) { cb_action_ = std::move(cb); }
+    void set_state_callback(OnStateChange cb)  { std::lock_guard<std::mutex> lk(callback_mutex_); cb_state_ = std::move(cb); }
+    void set_audio_callback(OnAudioReady cb)   { std::lock_guard<std::mutex> lk(callback_mutex_); cb_audio_ = std::move(cb); }
+    void set_event_callback(OnAIEvent cb)      { std::lock_guard<std::mutex> lk(callback_mutex_); cb_event_ = std::move(cb); }
+    void set_action_callback(OnActionRequest cb) { std::lock_guard<std::mutex> lk(callback_mutex_); cb_action_ = std::move(cb); }
     void send_action_result(const std::string& call_id, const std::string& result_json);
-    AIEngineState state() const { return state_.load(std::memory_order_acquire); }
-    bool is_speaking() const { return state() == AIEngineState::SPEAKING; }
-    bool is_listening() const { return state() == AIEngineState::LISTENING; }
+    [[nodiscard]] AIEngineState state() const { return state_.load(std::memory_order_acquire); }
+    [[nodiscard]] bool is_speaking() const { return state() == AIEngineState::SPEAKING; }
+    [[nodiscard]] bool is_listening() const { return state() == AIEngineState::LISTENING; }
 
     struct Stats {
         uint64_t audio_frames_sent    = 0;  
@@ -127,7 +130,7 @@ public:
         double   avg_tts_latency_ms   = 0;  
     };
 
-    Stats get_stats() const;
+    [[nodiscard]] Stats get_stats() const;
 
 private:
 
@@ -183,10 +186,11 @@ private:
     OnAudioReady   cb_audio_;
     OnAIEvent      cb_event_;
     OnActionRequest cb_action_;
+    mutable std::mutex callback_mutex_;
     mutable std::mutex stats_mutex_;
     Stats stats_;
 };
 
-} 
+} // namespace ai_engine
 
 #endif
