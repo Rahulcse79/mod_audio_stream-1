@@ -168,7 +168,7 @@ memcpy(frame->data, inj, got);
 | #15 (memset after cfg save) | Minor | Correct behavior, code smell only. |
 | #16 (inject_scratch pool realloc) | Minor | Pool memory, not a leak. Low impact. |
 | #17 (curl slist verify) | Minor | Needs full tts_elevenlabs.cpp trace. Deferred. |
-| #18 (telemetry counters) | Minor | Same-thread access, currently safe. |
+| #18 (ai_ivrs counters) | Minor | Same-thread access, currently safe. |
 | #19 (shutdown cleanup) | Minor | FreeSWITCH prevents unload with active calls. |
 | #20 (URI validator) | Minor | Feature limitation, not a bug. |
 

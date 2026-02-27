@@ -53,15 +53,15 @@ INFO  [abc-123] LIFECYCLE session_cleanup duration_ms=12 mode=ws
 | ERROR | Crashes prevented, data loss, connection failures | ON |
 | WARNING | Recoverable issues: overflow, underrun, timeout | ON |
 | NOTICE | State transitions, significant events | ON |
-| INFO | Operational telemetry (periodic summaries) | ON |
+| INFO | Operational ai_ivrs (periodic summaries) | ON |
 | DEBUG | Per-frame details, buffer states, timing | OFF |
 
-### 1.4 Implementation: Per-Session Telemetry Summary
+### 1.4 Implementation: Per-Session ai_ivrs Summary
 
 Rather than logging every frame, emit a periodic summary every N seconds:
 
 ```c
-struct session_telemetry {
+struct session_ai_ivrs {
     uint64_t capture_frames;
     uint64_t capture_bytes;
     uint64_t capture_trylock_failures;
@@ -572,8 +572,8 @@ AUDIO_STREAM_AI_ENABLE_TTS_CACHE=true
 | RSS per process | OS metrics | > expected |
 | OpenAI reconnect rate | AI events | > 1/min |
 | TTS error rate | TTS events | > 5% |
-| Inject underrun rate | Telemetry logs | > 5% |
-| Capture trylock failure | Telemetry logs | > 1% |
+| Inject underrun rate | ai_ivrs logs | > 5% |
+| Capture trylock failure | ai_ivrs logs | > 1% |
 
 ### 9.4 Operational Runbook
 

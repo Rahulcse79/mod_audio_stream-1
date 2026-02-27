@@ -1,7 +1,7 @@
 #include "mod_audio_stream.h"
 #include "audio_streamer_glue.h"
 #include "ai_engine/ai_engine.h"
-#include "ai_engine/telemetry_db.h"
+#include "ai_engine/ai_ivrs_db.h"
 #include <memory>
 #include <cstring>
 #include <cstdlib>
@@ -52,7 +52,7 @@ static void ai_event_handler(switch_core_session_t* session,
         fs_event = EVENT_AI_ACTION;
     }
 
-    /* Accumulate transcript text for telemetry DB */
+    /* Accumulate transcript text for ai_ivrs DB */
     if (event_name == "user_transcript" || event_name == "response_done") {
         switch_channel_t* ch = switch_core_session_get_channel(session);
         switch_media_bug_t* bug = (switch_media_bug_t*)switch_channel_get_private(ch, MY_BUG_NAME_AI);
@@ -268,7 +268,7 @@ switch_status_t ai_engine_session_init(switch_core_session_t *session,
                           ai_cfg.transfer_extension, ai_cfg.transfer_host, ai_cfg.transfer_port);
     }
 
-    /* Read PostgreSQL telemetry config */
+    /* Read PostgreSQL ai_ivrs config */
     ai_cfg.db_enabled = get_channel_var_int(session, "AI_DB_ENABLED", 0);
     safe_strncpy(ai_cfg.db_host,
                  get_channel_var(session, "AI_DB_HOST", "127.0.0.1"),
@@ -306,22 +306,22 @@ switch_status_t ai_engine_session_init(switch_core_session_t *session,
     tech_pvt->conversation_text = new std::string();
     switch_atomic_set(&tech_pvt->db_saved, SWITCH_FALSE);
 
-    /* Initialize telemetry schema (auto-create DB + table if missing) */
+    /* Initialize ai_ivrs schema (auto-create DB + table if missing) */
     if (ai_cfg.db_enabled) {
-        telemetry::DBConfig dbcfg;
+        ai_ivrs::DBConfig dbcfg;
         dbcfg.host     = ai_cfg.db_host;
         dbcfg.port     = ai_cfg.db_port;
         dbcfg.user     = ai_cfg.db_user;
         dbcfg.password = ai_cfg.db_password;
         dbcfg.dbname   = ai_cfg.db_name;
-        if (telemetry::ensure_schema(dbcfg)) {
+        if (ai_ivrs::ensure_schema(dbcfg)) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                              "(%s) Telemetry DB ready: %s@%s:%s/%s\n",
+                              "(%s) ai_ivrs DB ready: %s@%s:%s/%s\n",
                               uuid, ai_cfg.db_user, ai_cfg.db_host,
                               ai_cfg.db_port, ai_cfg.db_name);
         } else {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-                              "(%s) Telemetry DB init failed — call data will not be saved\n", uuid);
+                              "(%s) ai_ivrs DB init failed — call data will not be saved\n", uuid);
         }
     }
 
@@ -580,18 +580,18 @@ switch_status_t ai_engine_session_cleanup(switch_core_session_t *session,
         tech_pvt->resampler = nullptr;
     }
 
-    /* Save telemetry to PostgreSQL if enabled and not already saved */
+    /* Save ai_ivrs to PostgreSQL if enabled and not already saved */
     if (tech_pvt->ai_cfg.db_enabled && !switch_atomic_read(&tech_pvt->db_saved)) {
         switch_atomic_set(&tech_pvt->db_saved, SWITCH_TRUE);
 
-        telemetry::DBConfig dbcfg;
+        ai_ivrs::DBConfig dbcfg;
         dbcfg.host     = tech_pvt->ai_cfg.db_host;
         dbcfg.port     = tech_pvt->ai_cfg.db_port;
         dbcfg.user     = tech_pvt->ai_cfg.db_user;
         dbcfg.password = tech_pvt->ai_cfg.db_password;
         dbcfg.dbname   = tech_pvt->ai_cfg.db_name;
 
-        telemetry::CallRecord rec;
+        ai_ivrs::CallRecord rec;
         rec.channel_id = tech_pvt->sessionId;
 
         /* Build channel_details from channel variables */
@@ -617,15 +617,15 @@ switch_status_t ai_engine_session_cleanup(switch_core_session_t *session,
             rec.channel_details = details;
 
             const char* caller = switch_channel_get_variable(ch, "caller_id_number");
-            rec.extension = caller ? caller : "";
+            rec.extension = caller ? atoi(caller) : 0;
         }
 
         /* Recording WAV path — only set if recording actually started successfully */
         if (tech_pvt->ai_cfg.recording_path[0] &&
             switch_atomic_read(&tech_pvt->recording_started)) {
-            rec.conversation_wav_file = tech_pvt->ai_cfg.recording_path;
+            rec.conversation_wavfile_path = tech_pvt->ai_cfg.recording_path;
         } else {
-            rec.conversation_wav_file = "";
+            rec.conversation_wavfile_path = "";
         }
 
         /* Conversation text */
@@ -634,15 +634,15 @@ switch_status_t ai_engine_session_cleanup(switch_core_session_t *session,
         }
 
         /* Always save current Unix epoch as created_at */
-        rec.created_at = (int64_t)time(NULL);
+        rec.created_at = (int)time(NULL);
 
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                          "(%s) Saving telemetry to DB: ext=%s created_at=%lld text_len=%zu\n",
-                          tech_pvt->sessionId, rec.extension.c_str(),
-                          (long long)rec.created_at,
+                          "(%s) Saving ai_ivrs to DB: ext=%d created_at=%d text_len=%zu\n",
+                          tech_pvt->sessionId, rec.extension,
+                          rec.created_at,
                           rec.conversation_text.size());
 
-        telemetry::insert_call_record(dbcfg, rec);
+        ai_ivrs::insert_call_record(dbcfg, rec);
     }
 
     /* Free conversation text buffer */

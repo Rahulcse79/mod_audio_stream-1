@@ -1,14 +1,14 @@
 /*
- * telemetry_db.cpp — PostgreSQL telemetry writer for mod_audio_stream.
+ * ai_ivrs.cpp — PostgreSQL ai_ivrs writer for mod_audio_stream.
  *
- * Auto-creates the database "ai_user_data" and the "telemetry" table
+ * Auto-creates the database "ai_user_data" and the "ai_ivrs" table
  * in the public schema if they don't exist.
  *
  * Guarded by HAVE_LIBPQ — if libpq is not available, all functions
  * become no-ops that return false.
  */
 
-#include "telemetry_db.h"
+#include "ai_ivrs_db.h"
 
 #ifdef HAVE_LIBPQ
 #include <libpq-fe.h>
@@ -26,7 +26,7 @@
 #define TDB_LOG_ERR(fmt, ...)   fprintf(stderr, "[TELE-ERR]  " fmt, ##__VA_ARGS__)
 #endif
 
-namespace telemetry {
+namespace ai_ivrs {
 
 #ifdef HAVE_LIBPQ
 
@@ -62,7 +62,7 @@ bool ensure_schema(const DBConfig& cfg) {
         std::string ci = build_conninfo(cfg, "postgres");
         PGconn* conn = PQconnectdb(ci.c_str());
         if (PQstatus(conn) != CONNECTION_OK) {
-            TDB_LOG_ERR("[telemetry] Cannot connect to postgres DB: %s\n", PQerrorMessage(conn));
+            TDB_LOG_ERR("[ai_ivrs] Cannot connect to postgres DB: %s\n", PQerrorMessage(conn));
             PQfinish(conn);
             return false;
         }
@@ -75,19 +75,19 @@ bool ensure_schema(const DBConfig& cfg) {
         PQclear(res);
 
         if (!db_exists) {
-            TDB_LOG_INFO("[telemetry] Database '%s' not found — creating it\n", cfg.dbname.c_str());
+            TDB_LOG_INFO("[ai_ivrs] Database '%s' not found — creating it\n", cfg.dbname.c_str());
             /* CREATE DATABASE cannot run inside a transaction and cannot use params,
              * but the dbname is already validated via pg_escape above. */
             std::string create_sql = "CREATE DATABASE " + cfg.dbname;
             res = PQexec(conn, create_sql.c_str());
             if (PQresultStatus(res) != PGRES_COMMAND_OK) {
-                TDB_LOG_ERR("[telemetry] CREATE DATABASE failed: %s\n", PQerrorMessage(conn));
+                TDB_LOG_ERR("[ai_ivrs] CREATE DATABASE failed: %s\n", PQerrorMessage(conn));
                 PQclear(res);
                 PQfinish(conn);
                 return false;
             }
             PQclear(res);
-            TDB_LOG_INFO("[telemetry] Database '%s' created successfully\n", cfg.dbname.c_str());
+            TDB_LOG_INFO("[ai_ivrs] Database '%s' created successfully\n", cfg.dbname.c_str());
         }
 
         PQfinish(conn);
@@ -98,58 +98,75 @@ bool ensure_schema(const DBConfig& cfg) {
         std::string ci = build_conninfo(cfg, cfg.dbname);
         PGconn* conn = PQconnectdb(ci.c_str());
         if (PQstatus(conn) != CONNECTION_OK) {
-            TDB_LOG_ERR("[telemetry] Cannot connect to '%s': %s\n",
+            TDB_LOG_ERR("[ai_ivrs] Cannot connect to '%s': %s\n",
                         cfg.dbname.c_str(), PQerrorMessage(conn));
             PQfinish(conn);
             return false;
         }
 
         const char* create_table_sql =
-            "CREATE TABLE IF NOT EXISTS telemetry ("
-            "  id                    SERIAL PRIMARY KEY,"
-            "  channel_id            TEXT,"
-            "  channel_details       TEXT,"
-            "  extension             TEXT,"
-            "  conversation_wav_file TEXT,"
-            "  conversation_text     TEXT,"
-            "  created_at            BIGINT"
+            "CREATE TABLE IF NOT EXISTS ai_ivrs ("
+            "  id                        SERIAL PRIMARY KEY,"
+            "  channel_id                TEXT,"
+            "  channel_details           TEXT,"
+            "  extension                 INTEGER,"
+            "  conversation_wavfile_path TEXT,"
+            "  conversation_text         TEXT,"
+            "  created_at                INTEGER"
             ")";
 
         PGresult* res = PQexec(conn, create_table_sql);
         if (PQresultStatus(res) != PGRES_COMMAND_OK) {
-            TDB_LOG_ERR("[telemetry] CREATE TABLE failed: %s\n", PQerrorMessage(conn));
+            TDB_LOG_ERR("[ai_ivrs] CREATE TABLE failed: %s\n", PQerrorMessage(conn));
             PQclear(res);
             PQfinish(conn);
             return false;
         }
         PQclear(res);
 
-        /* Migration: if created_at is TIMESTAMPTZ (old schema), drop and re-add as BIGINT.
+        /* Migration: rename old columns and fix types to match backend entity.
+         * - conversation_wav_file -> conversation_wavfile_path
+         * - extension TEXT -> INTEGER
+         * - created_at BIGINT -> INTEGER
          * Also drop call_epoch if it exists from prior versions. */
         const char* migrate_sql =
             "DO $$ BEGIN "
             "  IF EXISTS ("
             "    SELECT 1 FROM information_schema.columns "
-            "    WHERE table_name='telemetry' AND column_name='call_epoch'"
+            "    WHERE table_name='ai_ivrs' AND column_name='call_epoch'"
             "  ) THEN "
-            "    ALTER TABLE telemetry DROP COLUMN call_epoch;"
+            "    ALTER TABLE ai_ivrs DROP COLUMN call_epoch;"
             "  END IF; "
             "  IF EXISTS ("
             "    SELECT 1 FROM information_schema.columns "
-            "    WHERE table_name='telemetry' AND column_name='created_at' "
-            "      AND data_type <> 'bigint'"
+            "    WHERE table_name='ai_ivrs' AND column_name='conversation_wav_file'"
             "  ) THEN "
-            "    ALTER TABLE telemetry DROP COLUMN created_at;"
-            "    ALTER TABLE telemetry ADD COLUMN created_at BIGINT;"
+            "    ALTER TABLE ai_ivrs RENAME COLUMN conversation_wav_file TO conversation_wavfile_path;"
+            "  END IF; "
+            "  IF EXISTS ("
+            "    SELECT 1 FROM information_schema.columns "
+            "    WHERE table_name='ai_ivrs' AND column_name='extension' "
+            "      AND data_type <> 'integer'"
+            "  ) THEN "
+            "    ALTER TABLE ai_ivrs DROP COLUMN extension;"
+            "    ALTER TABLE ai_ivrs ADD COLUMN extension INTEGER;"
+            "  END IF; "
+            "  IF EXISTS ("
+            "    SELECT 1 FROM information_schema.columns "
+            "    WHERE table_name='ai_ivrs' AND column_name='created_at' "
+            "      AND data_type <> 'integer'"
+            "  ) THEN "
+            "    ALTER TABLE ai_ivrs DROP COLUMN created_at;"
+            "    ALTER TABLE ai_ivrs ADD COLUMN created_at INTEGER;"
             "  END IF; "
             "END $$";
         res = PQexec(conn, migrate_sql);
         if (PQresultStatus(res) != PGRES_COMMAND_OK) {
-            TDB_LOG_WARN("[telemetry] Schema migration warning: %s\n", PQerrorMessage(conn));
+            TDB_LOG_WARN("[ai_ivrs] Schema migration warning: %s\n", PQerrorMessage(conn));
         }
         PQclear(res);
 
-        TDB_LOG_INFO("[telemetry] Schema ready: %s.public.telemetry\n", cfg.dbname.c_str());
+        TDB_LOG_INFO("[ai_ivrs] Schema ready: %s.public.ai_ivrs\n", cfg.dbname.c_str());
         PQfinish(conn);
     }
 
@@ -160,32 +177,33 @@ bool insert_call_record(const DBConfig& cfg, const CallRecord& rec) {
     std::string ci = build_conninfo(cfg, cfg.dbname);
     PGconn* conn = PQconnectdb(ci.c_str());
     if (PQstatus(conn) != CONNECTION_OK) {
-        TDB_LOG_ERR("[telemetry] insert: connect failed: %s\n", PQerrorMessage(conn));
+        TDB_LOG_ERR("[ai_ivrs] insert: connect failed: %s\n", PQerrorMessage(conn));
         PQfinish(conn);
         return false;
     }
 
     /* Use parameterised query to avoid SQL injection */
     const char* sql =
-        "INSERT INTO telemetry "
-        "(channel_id, channel_details, extension, conversation_wav_file, conversation_text, created_at) "
+        "INSERT INTO ai_ivrs "
+        "(channel_id, channel_details, extension, conversation_wavfile_path, conversation_text, created_at) "
         "VALUES ($1, $2, $3, $4, $5, $6)";
 
-    /* Convert epoch to string for PQexecParams (text mode) */
+    /* Convert integer fields to string for PQexecParams (text mode) */
+    std::string extension_str = std::to_string(rec.extension);
     std::string epoch_str = std::to_string(rec.created_at);
 
     const char* params[6] = {
         rec.channel_id.c_str(),
         rec.channel_details.c_str(),
-        rec.extension.c_str(),
-        rec.conversation_wav_file.c_str(),
+        extension_str.c_str(),
+        rec.conversation_wavfile_path.c_str(),
         rec.conversation_text.c_str(),
         epoch_str.c_str()
     };
 
     PGresult* res = PQexecParams(conn, sql, 6, NULL, params, NULL, NULL, 0);
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
-        TDB_LOG_ERR("[telemetry] INSERT failed: %s\n", PQerrorMessage(conn));
+        TDB_LOG_ERR("[ai_ivrs] INSERT failed: %s\n", PQerrorMessage(conn));
         PQclear(res);
         PQfinish(conn);
         return false;
@@ -194,15 +212,15 @@ bool insert_call_record(const DBConfig& cfg, const CallRecord& rec) {
     PQclear(res);
     PQfinish(conn);
 
-    TDB_LOG_INFO("[telemetry] Saved call record: channel_id=%s ext=%s\n",
-                 rec.channel_id.c_str(), rec.extension.c_str());
+    TDB_LOG_INFO("[ai_ivrs] Saved call record: channel_id=%s ext=%d\n",
+                 rec.channel_id.c_str(), rec.extension);
     return true;
 }
 
 #else  /* !HAVE_LIBPQ — stubs */
 
 bool ensure_schema(const DBConfig&) {
-    TDB_LOG_WARN("[telemetry] libpq not available — telemetry disabled\n");
+    TDB_LOG_WARN("[ai_ivrs] libpq not available — ai_ivrs disabled\n");
     return false;
 }
 
@@ -212,4 +230,4 @@ bool insert_call_record(const DBConfig&, const CallRecord&) {
 
 #endif  /* HAVE_LIBPQ */
 
-}  // namespace telemetry
+}  // namespace ai_ivrs

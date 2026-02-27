@@ -115,7 +115,7 @@
 |----------|------|--------|------|
 | `capture_callback` WRITE_REPLACE (line ~96) | `switch_mutex_lock` | `switch_mutex_unlock` (line ~145) | ⚠️ Long hold — reads inject_buffer, may re-lock |
 | `capture_callback` WRITE_REPLACE partial (line ~152) | `switch_mutex_lock` | `switch_mutex_unlock` (line ~161) | ⚠️ **Nested lock** in same callback |
-| `capture_callback` telemetry (line ~175) | `switch_mutex_lock` | `switch_mutex_unlock` (line ~183) | ✅ Short hold |
+| `capture_callback` ai_ivrs (line ~175) | `switch_mutex_lock` | `switch_mutex_unlock` (line ~183) | ✅ Short hold |
 | `stream_frame` (line ~1299) | `switch_mutex_trylock` | `switch_mutex_unlock` (line ~1304) | ✅ Non-blocking — good |
 | `stream_frame` buffer flush (line ~1323) | `switch_mutex_lock` | `switch_mutex_unlock` (lines ~1339,1342) | ⚠️ **Unlocks inside while loop**, re-locks |
 | `processMessage` inject resampler (line ~699) | `switch_mutex_lock` | `switch_mutex_unlock` (line ~732) | 🔴 **Holds mutex during `speex_resampler_init`** |
@@ -437,10 +437,10 @@ OpenAI WS ──trigger──→ barge_in ──flush──→ ring_buffer_, tts
 - **File:** `ai_engine/tts_elevenlabs.cpp`
 - **Issue:** Need to verify that curl headers slist is freed in all paths. (Not fully traceable without reading full synthesize function.)
 
-**Finding #18: Telemetry counters not atomic**
+**Finding #18: ai_ivrs counters not atomic**
 
 - **File:** `mod_audio_stream.c` (lines ~121–130, 173–183)
-- **Issue:** `inject_write_calls`, `inject_bytes`, `inject_underruns` are `uint64_t` — NOT atomic. They're written in WRITE_REPLACE (media thread) and read/reset in the telemetry section (same thread), so this is actually safe. But if ever read from another thread, it would be a data race.
+- **Issue:** `inject_write_calls`, `inject_bytes`, `inject_underruns` are `uint64_t` — NOT atomic. They're written in WRITE_REPLACE (media thread) and read/reset in the ai_ivrs section (same thread), so this is actually safe. But if ever read from another thread, it would be a data race.
 
 **Finding #19: `mod_audio_stream_shutdown()` doesn't clean up active sessions**
 

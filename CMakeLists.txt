@@ -27,7 +27,7 @@ find_package(CURL REQUIRED)
 set(USE_TLS ON CACHE BOOL "Enable TLS/SSL support using OpenSSL" FORCE)
 find_package(OpenSSL REQUIRED)
 
-# ---------- PostgreSQL libpq (telemetry) ----------
+# ---------- PostgreSQL libpq (ai_ivrs) ----------
 # Try pkg-config first, then fall back to Postgres.app or manual paths.
 set(PGSQL_INCLUDE_DIR "" CACHE PATH "Path to libpq-fe.h (overrides auto-detection)")
 set(PGSQL_LIBRARY "" CACHE FILEPATH "Path to libpq library (overrides auto-detection)")
@@ -56,7 +56,7 @@ if(PGSQL_INCLUDE_DIR AND PGSQL_LIBRARY)
     message(STATUS "  libpq headers: ${PGSQL_INCLUDE_DIR}")
     set(HAVE_LIBPQ TRUE)
 else()
-    message(WARNING "libpq not found — PostgreSQL telemetry will be disabled. "
+    message(WARNING "libpq not found — PostgreSQL ai_ivrs will be disabled. "
                     "Set PGSQL_INCLUDE_DIR and PGSQL_LIBRARY, or install PostgreSQL.")
     set(HAVE_LIBPQ FALSE)
 endif()
@@ -148,7 +148,7 @@ add_library(mod_audio_stream SHARED
     ai_engine/tts_cache.cpp
     ai_engine/openai_realtime.cpp
     ai_engine/ai_engine.cpp
-    ai_engine/telemetry_db.cpp
+    ai_engine/ai_ivrs_db.cpp
 )
 
 set_property(TARGET mod_audio_stream PROPERTY POSITION_INDEPENDENT_CODE ON)
@@ -164,7 +164,7 @@ target_link_libraries(mod_audio_stream PRIVATE
 # instead of fprintf(stderr, ...).
 target_compile_definitions(mod_audio_stream PRIVATE HAVE_SWITCH_H)
 
-# Link libpq for PostgreSQL telemetry
+# Link libpq for PostgreSQL ai_ivrs
 if(HAVE_LIBPQ)
     target_compile_definitions(mod_audio_stream PRIVATE HAVE_LIBPQ)
     target_include_directories(mod_audio_stream PRIVATE ${PGSQL_INCLUDE_DIR})

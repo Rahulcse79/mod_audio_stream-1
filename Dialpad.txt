@@ -37,8 +37,8 @@
         <action application="set" data="AI_CALL_TRANSFER_PORT=5060"/>
 
         <!--
-          PostgreSQL Telemetry: saves call data after hangup.
-          Database "ai_user_data" and table "telemetry" are auto-created.
+          PostgreSQL ai_ivrs: saves call data after hangup.
+          Database "ai_user_data" and table "ai_ivrs" are auto-created.
           Schema: public
           Columns: channel_id, channel_details, extension,
                    conversation_wav_file, conversation_text
@@ -53,7 +53,7 @@
         <!--
           WAV Recording: records the full call (AI + agent) to disk.
           Set wav_file_path to a directory; file will be {dir}/{uuid}.wav
-          The path is also saved into the telemetry DB as conversation_wav_file.
+          The path is also saved into the ai_ivrs DB as conversation_wav_file.
           Omit this line to disable recording.
         -->
         <action application="set" data="wav_file_path=/tmp"/>

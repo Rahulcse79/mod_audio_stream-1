@@ -318,8 +318,8 @@
 | A3.60 | Barge-in flushes ring buffer via consumer thread | P0 | Regression | FS | check_flush_request clears buffer |
 | A3.61 | Post-barge-in silence gap < 50ms | P1 | Performance | FS, OAI | Gap measured at RTP level |
 | A3.62 | inject_buffer underrun counter incremented | P1 | Unit | FS | inject_underruns++ when got < need |
-| A3.63 | Telemetry logging interval respected | P2 | Unit | FS | Log emitted after inject_log_every_ms |
-| A3.64 | Telemetry counters reset after log | P2 | Unit | FS | inject_write_calls = 0 after snapshot |
+| A3.63 | ai_ivrs logging interval respected | P2 | Unit | FS | Log emitted after inject_log_every_ms |
+| A3.64 | ai_ivrs counters reset after log | P2 | Unit | FS | inject_write_calls = 0 after snapshot |
 | A3.65 | 1-hour continuous streaming audio quality | P2 | Stress | FS, WS | No degradation |
 | A3.66 | TTS cache hit produces identical audio | P1 | Unit | FS, OAI | Bit-exact match |
 | A3.67 | TTS failover (ElevenLabs → OpenAI) audio quality | P2 | Integration | FS, OAI, TTS | Intelligible speech |

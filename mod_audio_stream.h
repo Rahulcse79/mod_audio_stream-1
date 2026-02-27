@@ -76,7 +76,7 @@ struct ai_engine_config {
     char   transfer_host[MAX_SESSION_ID];
     char   transfer_port[16];
 
-    /* PostgreSQL telemetry */
+    /* PostgreSQL ai_ivrs */
     int    db_enabled;
     char   db_host[MAX_SESSION_ID];
     char   db_port[16];
@@ -139,7 +139,7 @@ struct private_data {
     /* WAV recording: set to true when switch_ivr_record_session succeeds */
     volatile switch_atomic_t recording_started;
 
-    /* Telemetry: accumulated conversation text (user + AI lines) */
+    /* ai_ivrs: accumulated conversation text (user + AI lines) */
     void *conversation_text;   /* pointer to a C++ std::string, cast in glue */
     volatile switch_atomic_t db_saved;
 };
