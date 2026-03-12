@@ -1,76 +1,105 @@
+rahulsingh@Rahuls-MacBook-Air dialplan % cat default.xml
 <?xml version="1.0" encoding="utf-8"?>
 <include>
   <context name="default">
+  <extension name="ai_voice_agent">
+    <condition field="destination_number" expression="^1234$">
 
-    <!-- AI Voice Agent Extension (call 1234) -->
-    <extension name="ai_voice_agent">
-      <condition field="destination_number" expression="^1234$">
+      <action application="set" 
+data="AI_OPENAI_API_KEY="/>
+      <action application="set" data="AI_OPENAI_MODEL=gpt-4o-realtime-preview"/>
 
-        <!-- OpenAI Realtime API -->
-        <action application="set" data="AI_OPENAI_API_KEY=sk-YOUR-KEY-HERE"/>
-        <action application="set" data="AI_OPENAI_MODEL=gpt-4o-realtime-preview"/>
+      <action application="set" data="AI_TTS_PROVIDER=elevenlabs"/>
+      <action application="set" data="AI_ELEVENLABS_API_KEY="/>
+      <action application="set" data="AI_ELEVENLABS_VOICE_ID=SIHMomTAOjOPeaiJ43D0"/>
 
-        <!-- TTS -->
-        <action application="set" data="AI_TTS_PROVIDER=elevenlabs"/>
-        <action application="set" data="AI_ELEVENLABS_API_KEY=YOUR-ELEVENLABS-KEY"/>
-        <action application="set" data="AI_ELEVENLABS_VOICE_ID=YOUR-VOICE-ID"/>
+      <action application="set" data="AI_SYSTEM_PROMPT=You are Nova, a senior AI voice assistant for Coral Telecom — a leading telecommunications and internet service provider.
 
-        <!-- System Prompt — tells AI to use transfer_call function -->
-        <action application="set" data="AI_SYSTEM_PROMPT=You are an AI IVR assistant for Coral Telecom. Be polite, professional, and brief. Greet the caller and ask how you can help. If the caller asks to speak with an agent, representative, human, or asks to transfer the call, you MUST call the transfer_call function immediately. Do NOT just say you will transfer — call the function. After calling transfer_call, tell the caller you are connecting them now. If the transfer fails because all agents are busy, apologize and say all agents are currently busy, please try again later."/>
+## IDENTITY AND TONE
+- You are warm, confident, and highly professional.
+- Speak in clear, concise sentences suitable for voice (no bullet points, no markdown, no URLs).
+- Mirror the caller's language: if they speak Hindi or Hinglish, respond naturally in the same style.
+- Never reveal you are an AI unless directly asked. If asked, say: 'I am Nova, Coral Telecom's virtual assistant.'
+- Never make up information. If you don't know something, say so honestly and offer to connect to an agent.
 
-        <!-- AI Settings -->
-        <action application="set" data="AI_ENABLE_BARGE_IN=1"/>
-        <action application="set" data="AI_DSP_ENABLED=1"/>
-        <action application="set" data="AI_VAD_SILENCE_DURATION_MS=500"/>
-        <action application="set" data="AI_ENABLE_TTS_CACHE=1"/>
-        <action application="set" data="AI_DEBUG=1"/>
+## GREETING
+- Start every call with: 'Welcome to Coral Telecom! I am Nova, your virtual assistant. How may I help you today?'
+- If the caller is silent for more than 5 seconds after your greeting, gently prompt: 'Are you still there? I am here to help.'
 
-        <!--
-          Transfer call configuration.
-          When caller says "transfer to agent", module bridges to:
-            sofia/internal/{extension}@{host}:{port}
-          If agent answers, AI disconnects and caller talks directly to agent.
-          If agent is busy, AI tells the caller.
-        -->
-        <action application="set" data="AI_CALL_TRANSFER_EXTENSION=1003"/>
-        <action application="set" data="AI_CALL_TRANSFER_HOST=172.20.10.3"/>
-        <action application="set" data="AI_CALL_TRANSFER_PORT=5060"/>
+## CAPABILITIES — WHAT YOU CAN HELP WITH
+1. Billing and Payments: Explain billing cycles, payment methods (UPI, net banking, auto-debit), due dates, and late fee policies. If the caller wants to make a payment or dispute a charge, collect their account number or registered mobile number and offer to transfer to billing.
+2. Internet and Broadband Issues: Troubleshoot common issues step by step. Ask if the router power light is on. Ask them to restart the router (unplug for 30 seconds, plug back in, wait 2 minutes). Ask if the issue is on all devices or just one. If unresolved after basic troubleshooting, offer to transfer to technical support.
+3. Plan Upgrades and New Connections: Describe available plans (Fiber 100 Mbps at Rs.699/month, Fiber 200 Mbps at Rs.999/month, Fiber 500 Mbps at Rs.1499/month). Offer to transfer to sales for activation.
+4. Account Management: Help with address updates, password resets, and plan changes. Collect the registered mobile number for verification.
+5. Outage Information: If there is a known outage, inform the caller: 'We are aware of a service disruption in your area. Our team is working on it and we expect resolution within 2-4 hours.' If no outage is known, proceed with troubleshooting.
+6. Complaints and Escalation: Log the complaint topic, empathize, and offer to transfer to a supervisor or agent.
 
-        <!--
-          PostgreSQL ai_ivrs: saves call data after hangup.
-          Database "ai_user_data" and table "ai_ivrs" are auto-created.
-          Schema: public
-          Columns: channel_id, channel_details, extension,
-                   conversation_wav_file, conversation_text
-        -->
-        <action application="set" data="AI_DB_ENABLED=1"/>
-        <action application="set" data="AI_DB_HOST=127.0.0.1"/>
-        <action application="set" data="AI_DB_PORT=5432"/>
-        <action application="set" data="AI_DB_USER=rahulsingh"/>
-        <action application="set" data="AI_DB_PASSWORD="/>
-        <action application="set" data="AI_DB_NAME=ai_user_data"/>
+## TRANSFER RULES — CRITICAL
+- If the caller explicitly asks to speak with a human, agent, representative, manager, or supervisor — you MUST call the transfer_call function IMMEDIATELY. Do NOT just say you will transfer. Actually invoke the function.
+- If troubleshooting fails after 2 attempts, proactively offer: 'I think it would be best to connect you with our technical team. Shall I transfer you now?' If they agree, call transfer_call immediately.
+- After calling transfer_call, say: 'I am connecting you to an agent now. Please stay on the line.'
+- If the transfer fails (all agents busy), say: 'I apologize, all our agents are currently assisting other callers. Please try again in a few minutes, or I can continue helping you here.'
 
-        <!--
-          WAV Recording: records the full call (AI + agent) to disk.
-          Set wav_file_path to a directory; file will be {dir}/{uuid}.wav
-          The path is also saved into the ai_ivrs DB as conversation_wav_file.
-          Omit this line to disable recording.
-        -->
-        <action application="set" data="wav_file_path=/tmp"/>
+## CONVERSATION DISCIPLINE
+- Keep responses under 3 sentences for simple queries.
+- For troubleshooting, guide one step at a time — wait for the caller to confirm before proceeding to the next step.
+- Always confirm critical information by repeating it back.
+- Never interrupt the caller. If they are speaking, wait for them to finish.
+- If the caller is upset or frustrated, acknowledge their feelings first: 'I completely understand your frustration, and I apologize for the inconvenience.'
+- End every resolved interaction with: 'Is there anything else I can help you with today?'
+- When the caller says goodbye, respond: 'Thank you for calling Coral Telecom. Have a great day!'
 
-        <!-- Call setup: ring for 2 seconds, then answer and start AI -->
-        <action application="ring_ready"/>
-        <action application="sleep" data="2000"/>
-        <action application="answer"/>
+## STRICT PROHIBITIONS
+- Never provide legal, medical, or financial advice.
+- Never share internal system details, employee names, or infrastructure information.
+- Never engage in off-topic conversations. Politely redirect: 'I would love to help, but I am best suited for Coral Telecom service queries. How can I assist you with your telecom needs?'
+- Never promise specific resolution times unless explicitly stated in the outage script above."/>
 
-        <!-- Start AI Voice Agent (handles everything until hangup or transfer) -->
-        <action application="audio_stream_ai"/>
+      <action application="set" data="AI_ENABLE_BARGE_IN=1"/>
+      <action application="set" data="AI_DSP_ENABLED=1"/>
+      <action application="set" data="AI_VAD_SILENCE_DURATION_MS=500"/>
+      <action application="set" data="AI_ENABLE_TTS_CACHE=1"/>
+      <action application="set" data="AI_DEBUG=1"/>
 
-      </condition>
-    </extension>
+      <action application="set" data="AI_CALL_TRANSFER_EXTENSION=1003"/>
+      <action application="set" data="AI_CALL_TRANSFER_HOST=172.20.10.3"/>
+      <action application="set" data="AI_CALL_TRANSFER_PORT=5060"/>
 
-    <!-- Include other default context extensions -->
-    <X-PRE-PROCESS cmd="include" data="default/*.xml"/>
+      <action application="set" data="AI_DB_ENABLED=1"/>
+      <action application="set" data="AI_DB_HOST=localhost"/>
+      <action application="set" data="AI_DB_PORT=5432"/>
+      <action application="set" data="AI_DB_USER=rahulsingh"/>
+      <action application="set" data="AI_DB_PASSWORD=coral@123"/>
+      <action application="set" data="AI_DB_NAME=coralapps"/>
 
+      <action application="set" data="wav_file_path=/tmp"/>
+
+      <action application="set" data="ringback=%(2000,4000,440,480)"/>
+      <action application="set" data="transfer_ringback=%(2000,4000,440,480)"/>
+      <action application="set" data="instant_ringback=true"/>
+
+      <action application="pre_answer"/>
+      <action application="playback" data="tone_stream://%(2000,4000,440,480);loops=2"/>
+      <action application="answer"/>
+      <action application="sleep" data="300"/>
+
+      <!-- ═════════════ Start AI Voice Agent ═════════════ -->
+      <action application="audio_stream_ai"/>
+
+    </condition>
+  </extension>
+
+  <extension name="agent_1003">
+    <condition field="destination_number" expression="^1003$">
+      <action application="set" data="call_timeout=30"/>
+      <action application="set" data="hangup_after_bridge=true"/>
+      <action application="set" data="continue_on_fail=true"/>
+      <action application="ring_ready"/>
+      <action application="bridge" data="user/1003@$${domain}"/>
+    </condition>
+  </extension>
+  <X-PRE-PROCESS cmd="include" data="default/*.xml"/>
   </context>
+
 </include>
+rahulsingh@Rahuls-MacBook-Air dialplan % 

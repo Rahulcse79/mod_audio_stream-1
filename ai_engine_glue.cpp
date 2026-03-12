@@ -37,6 +37,20 @@ static inline void safe_strncpy(char* dest, const char* src, size_t max) {
     dest[max - 1] = '\0';
 }
 
+/* Strip all whitespace (spaces, tabs, newlines, carriage returns) in-place.
+ * API keys should never contain whitespace — this guards against copy-paste
+ * errors in dialplan configuration. */
+static inline void strip_whitespace(char* s) {
+    if (!s) return;
+    char* dst = s;
+    for (char* src = s; *src; src++) {
+        if (*src != ' ' && *src != '\t' && *src != '\n' && *src != '\r') {
+            *dst++ = *src;
+        }
+    }
+    *dst = '\0';
+}
+
 static void ai_event_handler(switch_core_session_t* session,
                                responseHandler_t responseHandler,
                                const std::string& event_name,
@@ -208,6 +222,7 @@ switch_status_t ai_engine_session_init(switch_core_session_t *session,
     safe_strncpy(ai_cfg.openai_api_key,
                  get_channel_var(session, "AI_OPENAI_API_KEY", ""),
                  MAX_API_KEY_LEN);
+    strip_whitespace(ai_cfg.openai_api_key);
     safe_strncpy(ai_cfg.openai_model,
                  get_channel_var(session, "AI_OPENAI_MODEL", "gpt-4o-realtime-preview"),
                  MAX_MODEL_LEN);
@@ -230,6 +245,7 @@ switch_status_t ai_engine_session_init(switch_core_session_t *session,
     safe_strncpy(ai_cfg.elevenlabs_api_key,
                  get_channel_var(session, "AI_ELEVENLABS_API_KEY", ""),
                  MAX_API_KEY_LEN);
+    strip_whitespace(ai_cfg.elevenlabs_api_key);
     safe_strncpy(ai_cfg.elevenlabs_voice_id,
                  get_channel_var(session, "AI_ELEVENLABS_VOICE_ID", ""),
                  MAX_VOICE_ID_LEN);
@@ -331,9 +347,15 @@ switch_status_t ai_engine_session_init(switch_core_session_t *session,
         goto init_error;
     }
     if (strcmp(ai_cfg.tts_provider, "elevenlabs") == 0 && strlen(ai_cfg.elevenlabs_api_key) == 0) {
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                          "(%s) AI_ELEVENLABS_API_KEY not set — cannot start ElevenLabs TTS\n", uuid);
-        goto init_error;
+        if (strlen(ai_cfg.openai_api_key) > 0) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                              "(%s) AI_ELEVENLABS_API_KEY not set — falling back to OpenAI TTS\n", uuid);
+            safe_strncpy(ai_cfg.tts_provider, "openai", sizeof(ai_cfg.tts_provider));
+        } else {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                              "(%s) AI_ELEVENLABS_API_KEY not set and no OpenAI fallback available — cannot start TTS\n", uuid);
+            goto init_error;
+        }
     }
 
     tech_pvt->inject_buffer = NULL;

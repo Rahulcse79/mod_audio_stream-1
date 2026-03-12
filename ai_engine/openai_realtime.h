@@ -29,7 +29,7 @@ struct OpenAIRealtimeConfig {
     bool        eagerly_emit_text  = true;    
     float       temperature        = 0.8f;
     int         max_response_output_tokens = 4096;
-    int         connect_timeout_ms = 5000;
+    int         connect_timeout_ms = 10000;
     int         ping_interval_s    = 25;
     std::vector<std::string> tools;
 };

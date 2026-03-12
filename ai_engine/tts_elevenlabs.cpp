@@ -489,12 +489,21 @@ std::unique_ptr<ITTSEngine> create_tts_engine(const TTSConfig& cfg) {
     std::unique_ptr<ITTSEngine> fallback;
 
     if (cfg.provider == "elevenlabs") {
-        primary = std::make_unique<ElevenLabsTTS>();
-        primary->configure(cfg);
+        if (cfg.elevenlabs_api_key.empty()) {
+            /* ElevenLabs key missing — promote OpenAI to primary if available */
+            if (!cfg.openai_api_key.empty()) {
+                primary = std::make_unique<OpenAITTS>();
+                primary->configure(cfg);
+            }
+            /* else: no usable engine, return nullptr */
+        } else {
+            primary = std::make_unique<ElevenLabsTTS>();
+            primary->configure(cfg);
 
-        if (!cfg.openai_api_key.empty()) {
-            fallback = std::make_unique<OpenAITTS>();
-            fallback->configure(cfg);
+            if (!cfg.openai_api_key.empty()) {
+                fallback = std::make_unique<OpenAITTS>();
+                fallback->configure(cfg);
+            }
         }
     } else if (cfg.provider == "openai") {
         primary = std::make_unique<OpenAITTS>();
